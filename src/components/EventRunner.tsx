@@ -1,0 +1,743 @@
+import { useEffect, useMemo, useState } from 'react'
+import type { EventDetail, LeagueWithPlayers, Match, Player } from '../types'
+import type { Store } from '../lib/store'
+import { planEvent, roundRobin } from '../lib/planner'
+import {
+  createEventWithLeagues,
+  createQualifierEvent,
+  deleteEvent,
+  fetchEventDetail,
+  finishEvent,
+  promoteQualifierToLeagues,
+} from '../lib/events'
+import { Avatar } from './bits'
+import { SkillBadge } from './SkillBadge'
+import { Modal } from './Modal'
+
+export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: string) => void }) {
+  const liveEvent = store.events.find((e) => e.status === 'live' || e.status === 'qualifying')
+  const [detail, setDetail] = useState<EventDetail | null>(null)
+  const [loadingDetail, setLoadingDetail] = useState(false)
+
+  const refreshDetail = async (id: string) => {
+    setLoadingDetail(true)
+    try {
+      setDetail(await fetchEventDetail(id))
+    } finally {
+      setLoadingDetail(false)
+    }
+  }
+
+  useEffect(() => {
+    if (liveEvent) refreshDetail(liveEvent.id)
+    else setDetail(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveEvent?.id])
+
+  if (liveEvent && detail) {
+    if (detail.event.status === 'qualifying') {
+      return (
+        <QualifierView
+          store={store}
+          detail={detail}
+          loading={loadingDetail}
+          onChanged={() => refreshDetail(liveEvent.id)}
+        />
+      )
+    }
+    return (
+      <LiveEvent
+        store={store}
+        detail={detail}
+        loading={loadingDetail}
+        onSelect={onSelect}
+        onChanged={() => refreshDetail(liveEvent.id)}
+      />
+    )
+  }
+
+  return <Setup store={store} onStarted={(id) => refreshDetail(id)} />
+}
+
+// ───────────────────────── qualification round ─────────────────────────
+
+/** Deterministic random pairing seeded by event id (stable across refreshes). */
+function hashStr(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+function qualifierPairings(players: Player[], seed: string): { pairs: [Player, Player][]; bye: Player | null } {
+  const arr = [...players]
+    .map((p) => ({ p, k: hashStr(`${seed}:${p.id}`) }))
+    .sort((a, b) => a.k - b.k)
+    .map((x) => x.p)
+  const pairs: [Player, Player][] = []
+  for (let i = 0; i + 1 < arr.length; i += 2) pairs.push([arr[i], arr[i + 1]])
+  const bye = arr.length % 2 ? arr[arr.length - 1] : null
+  return { pairs, bye }
+}
+
+function QualifierView({
+  store,
+  detail,
+  loading,
+  onChanged,
+}: {
+  store: Store
+  detail: EventDetail
+  loading: boolean
+  onChanged: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const pool = detail.leagues[0]
+  const players = pool?.players ?? []
+  const { pairs, bye } = qualifierPairings(players, detail.event.id)
+  const played = pairs.filter((f) => findMatch(detail.matches, f[0].id, f[1].id)).length
+  const allDone = played === pairs.length
+
+  async function build() {
+    setBusy(true)
+    try {
+      await promoteQualifierToLeagues(detail.event.id)
+      await store.refresh()
+      onChanged()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="animate-fade space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-ink-850 p-4 ring-1 ring-ink-700">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="font-extrabold">{detail.event.name}</span>
+            <span className="rounded bg-brand/15 px-1.5 py-0.5 text-[11px] font-bold uppercase text-brand-400">Qualifier</span>
+          </div>
+          <div className="mt-0.5 text-xs text-ink-500">
+            Random pairings · {played}/{pairs.length} played · then split into leagues by result
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={async () => { await deleteEvent(detail.event.id); await store.refresh() }}
+            className="rounded-lg px-3 py-2 text-xs font-semibold text-ink-500 ring-1 ring-ink-700 hover:text-loss"
+          >
+            Discard
+          </button>
+          <button
+            onClick={build}
+            disabled={busy}
+            title={allDone ? '' : 'Some qualifier matches are still open — leagues use current ratings'}
+            className="rounded-lg bg-brand px-3 py-2 text-xs font-bold text-ink-900 hover:bg-brand-400 disabled:opacity-40"
+          >
+            {busy ? 'Building…' : '⚡ Build leagues from results'}
+          </button>
+        </div>
+      </div>
+
+      {!allDone && (
+        <div className="rounded-lg bg-ink-800 px-3 py-2 text-xs text-ink-400">
+          Play all pairings to fully calibrate, or build leagues now — players are ranked by their
+          current ELO (updated live as results come in).
+        </div>
+      )}
+
+      <div className="overflow-hidden rounded-xl bg-ink-850 ring-1 ring-ink-700">
+        <div className="flex items-center justify-between px-4 py-3" style={{ background: 'linear-gradient(90deg, #ff550022, transparent)' }}>
+          <span className="font-bold">Qualification round</span>
+          <span className="text-xs text-ink-500">{players.length} players</span>
+        </div>
+        <div className="px-2 py-2">
+          <div className="space-y-1">
+            {pairs.map((f) => {
+              const m = findMatch(detail.matches, f[0].id, f[1].id)
+              const key = `${f[0].id}:${f[1].id}`
+              return (
+                <QualifierRow key={key} a={f[0]} b={f[1]} match={m} eventId={detail.event.id} leagueId={pool!.id} store={store} onDone={onChanged} />
+              )
+            })}
+            {bye && (
+              <div className="flex items-center gap-2 rounded-lg bg-ink-800/40 px-3 py-2 text-sm text-ink-500">
+                <span className="flex-1">{bye.name}</span>
+                <span className="rounded bg-ink-700 px-2 py-0.5 text-[11px] font-semibold">bye</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      {loading && <div className="text-center text-xs text-ink-500">syncing…</div>}
+    </div>
+  )
+}
+
+function QualifierRow({
+  a,
+  b,
+  match,
+  eventId,
+  leagueId,
+  store,
+  onDone,
+}: {
+  a: Player
+  b: Player
+  match?: Match
+  eventId: string
+  leagueId: string
+  store: Store
+  onDone: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <FixtureRow
+      a={a}
+      b={b}
+      match={match}
+      open={open}
+      onToggle={() => setOpen((v) => !v)}
+      format="1 set to 11"
+      leagueId={leagueId}
+      eventId={eventId}
+      store={store}
+      onDone={() => { setOpen(false); onDone() }}
+    />
+  )
+}
+
+// ───────────────────────── setup / generation ─────────────────────────
+
+function Setup({ store, onStarted }: { store: Store; onStarted: (id: string) => void }) {
+  const [name, setName] = useState('League Night')
+  const [tables, setTables] = useState(15)
+  const [duration, setDuration] = useState(120)
+  const [setMinutes, setSetMinutes] = useState(8)
+  const [method, setMethod] = useState<'elo' | 'qualifier'>('elo')
+  const withQualifier = method === 'qualifier'
+  // Track who is OUT (default: everyone checked in; roster changes auto-include).
+  const [unchecked, setUnchecked] = useState<Set<string>>(() => new Set())
+  const [busy, setBusy] = useState(false)
+
+  const roster = useMemo(() => [...store.players].sort((a, b) => b.elo - a.elo), [store.players])
+  const isIn = (id: string) => !unchecked.has(id)
+  const count = roster.filter((p) => isIn(p.id)).length
+  const plan = useMemo(
+    () => planEvent(count, tables, duration, { withQualifier, setMinutes }),
+    [count, tables, duration, withQualifier, setMinutes],
+  )
+
+  const toggle = (id: string) =>
+    setUnchecked((s) => {
+      const n = new Set(s)
+      n.has(id) ? n.delete(id) : n.add(id)
+      return n
+    })
+
+  async function start() {
+    if (count < 3) return
+    setBusy(true)
+    try {
+      const players = store.players.filter((p) => isIn(p.id))
+      const config = { name: name.trim() || 'League Night', tables, durationMin: duration, setMinutes, withQualifier }
+      const id =
+        method === 'qualifier'
+          ? await createQualifierEvent(config, players)
+          : await createEventWithLeagues(config, players)
+      await store.refresh()
+      onStarted(id)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (store.players.length === 0) {
+    return (
+      <div className="grid place-items-center rounded-xl border border-dashed border-ink-600 py-16 text-center">
+        <div className="text-4xl">📅</div>
+        <div className="mt-3 text-lg font-semibold">No roster yet</div>
+        <div className="mt-1 max-w-sm text-sm text-ink-500">
+          Add players in the <span className="font-semibold text-brand">Roster</span> tab (or load the
+          sample roster) before generating leagues.
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid animate-fade gap-5 lg:grid-cols-[380px_1fr]">
+      {/* config + check-in */}
+      <div className="space-y-4">
+        <div className="space-y-3 rounded-xl bg-ink-850 p-5 ring-1 ring-ink-700">
+          <h2 className="text-sm font-bold uppercase tracking-wider text-ink-500">New event</h2>
+          <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-lg bg-ink-900 px-3 py-2 text-sm font-semibold outline-none ring-1 ring-ink-700" placeholder="Event name" />
+          <div className="grid grid-cols-3 gap-2">
+            <Mini label="Tables" value={tables} set={setTables} min={1} max={30} />
+            <Mini label="Minutes" value={duration} set={setDuration} min={30} max={300} step={15} />
+            <Mini label="Set min" value={setMinutes} set={setSetMinutes} min={4} max={25} />
+          </div>
+          <div>
+            <div className="mb-1.5 text-[11px] uppercase tracking-wide text-ink-500">How to split players into leagues</div>
+            <div className="grid grid-cols-2 gap-2">
+              <MethodCard
+                active={method === 'elo'}
+                onClick={() => setMethod('elo')}
+                title="By ELO rank"
+                desc="Seed leagues from current ratings. Best for returning players."
+                icon="📊"
+              />
+              <MethodCard
+                active={method === 'qualifier'}
+                onClick={() => setMethod('qualifier')}
+                title="Random + qualifier"
+                desc="Random round first, then split by result. Best for unknown levels."
+                icon="🎲"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="overflow-hidden rounded-xl bg-ink-850 ring-1 ring-ink-700">
+          <div className="flex items-center justify-between px-4 py-3">
+            <span className="text-sm font-bold">Check-in <span className="text-ink-500">· {count}/{roster.length}</span></span>
+            <div className="flex gap-1.5">
+              <button onClick={() => setUnchecked(new Set())} className="rounded-md bg-ink-700 px-2 py-1 text-[11px] font-semibold">All</button>
+              <button onClick={() => setUnchecked(new Set(roster.map((p) => p.id)))} className="rounded-md bg-ink-700 px-2 py-1 text-[11px] font-semibold">None</button>
+            </div>
+          </div>
+          <div className="max-h-[320px] divide-y divide-ink-800 overflow-y-auto">
+            {roster.map((p) => {
+              const on = isIn(p.id)
+              return (
+                <button key={p.id} onClick={() => toggle(p.id)} className="flex w-full items-center gap-2.5 px-4 py-2 text-left hover:bg-ink-800">
+                  <span className="grid h-5 w-5 place-items-center rounded text-xs" style={{ background: on ? '#32d74b' : '#2a3340', color: on ? '#0b0d11' : 'transparent' }}>✓</span>
+                  <SkillBadge elo={p.elo} size="sm" />
+                  <span className="flex-1 truncate text-sm font-semibold" style={{ opacity: on ? 1 : 0.5 }}>{p.name}</span>
+                  <span className="font-mono text-xs text-ink-500">{p.elo}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* plan preview + start */}
+      <div className="space-y-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <Kpi label="Players" value={String(count)} />
+          <Kpi label="Leagues" value={String(plan.leagues.length)} />
+          <Kpi label="Est. time" value={`${plan.totalMinutes}m`} ok={plan.fits} />
+          <Kpi label="Finish spread" value={`±${plan.finishSpreadMin}m`} ok={plan.finishSpreadMin <= setMinutes} />
+        </div>
+        {plan.warnings.map((w, i) => (
+          <div key={i} className="rounded-lg bg-brand/10 px-3 py-2 text-xs text-brand-400 ring-1 ring-brand/30">⚠ {w}</div>
+        ))}
+
+        <div className="overflow-hidden rounded-xl ring-1 ring-ink-700">
+          <div className="grid grid-cols-[1fr_70px_70px_70px] gap-2 bg-ink-850 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-ink-500">
+            <span>Proposed league</span><span className="text-center">Players</span><span className="text-center">Matches</span><span className="text-right">Time</span>
+          </div>
+          <div className="divide-y divide-ink-800">
+            {plan.qualifierMinutes > 0 && (
+              <div className="grid grid-cols-[1fr_70px_70px_70px] gap-2 px-4 py-2.5 text-sm">
+                <span className="font-semibold text-brand-400">Qualification</span>
+                <span className="text-center text-ink-500">{count}</span><span className="text-center text-ink-500">—</span>
+                <span className="text-right font-mono">{plan.qualifierMinutes}m</span>
+              </div>
+            )}
+            {plan.leagues.map((l, i) => (
+              <div key={i} className="grid grid-cols-[1fr_70px_70px_70px] items-center gap-2 px-4 py-2.5 text-sm">
+                <span className="font-semibold">{['Elite','Division 1','Division 2','Division 3','Division 4','Division 5'][i] ?? `League ${i+1}`}{l.size===5 && <span className="ml-1 text-[10px] text-ink-500">pools→playoff</span>}</span>
+                <span className="text-center font-mono">{l.size}</span>
+                <span className="text-center font-mono text-ink-500">{l.matches}</span>
+                <span className="text-right font-mono">{l.estMinutes}m</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <button
+          onClick={start}
+          disabled={busy || count < 3}
+          className="w-full rounded-xl bg-brand py-3.5 text-base font-extrabold text-ink-900 shadow-glow transition hover:bg-brand-400 disabled:opacity-40"
+        >
+          {busy
+            ? 'Starting…'
+            : count < 3
+            ? 'Check in at least 3 players'
+            : method === 'qualifier'
+            ? `🎲 Start qualifier · ${count} players`
+            : `⚡ Generate ${plan.leagues.length} leagues & start`}
+        </button>
+        {method === 'qualifier' && count >= 3 && (
+          <p className="text-center text-xs text-ink-500">
+            Players play one random set, then you split them into the {plan.leagues.length} leagues above by result.
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ───────────────────────── live event ─────────────────────────
+
+function LiveEvent({
+  store,
+  detail,
+  loading,
+  onSelect,
+  onChanged,
+}: {
+  store: Store
+  detail: EventDetail
+  loading: boolean
+  onSelect: (id: string) => void
+  onChanged: () => void
+}) {
+  const [confirmFinish, setConfirmFinish] = useState(false)
+  const totalFixtures = detail.leagues.reduce((s, l) => s + fixtures(l).length, 0)
+  const playedFixtures = detail.leagues.reduce(
+    (s, l) => s + fixtures(l).filter((f) => findMatch(detail.matches, f[0].id, f[1].id)).length,
+    0,
+  )
+
+  return (
+    <div className="animate-fade space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-ink-850 p-4 ring-1 ring-ink-700">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-win" />
+            <span className="font-extrabold">{detail.event.name}</span>
+            <span className="rounded bg-win/15 px-1.5 py-0.5 text-[11px] font-bold uppercase text-win">Live</span>
+          </div>
+          <div className="mt-0.5 text-xs text-ink-500">
+            {detail.event.participantIds.length} players · {detail.leagues.length} leagues · {playedFixtures}/{totalFixtures} matches played
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={async () => { await deleteEvent(detail.event.id); await store.refresh() }}
+            className="rounded-lg px-3 py-2 text-xs font-semibold text-ink-500 ring-1 ring-ink-700 hover:text-loss"
+          >
+            Discard
+          </button>
+          <button onClick={() => setConfirmFinish(true)} className="rounded-lg bg-brand px-3 py-2 text-xs font-bold text-ink-900 hover:bg-brand-400">
+            ✓ Finish event
+          </button>
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        {detail.leagues.map((l) => (
+          <LeagueCard key={l.id} league={l} matches={detail.matches} store={store} onSelect={onSelect} onChanged={onChanged} />
+        ))}
+      </div>
+
+      {loading && <div className="text-center text-xs text-ink-500">syncing…</div>}
+
+      {confirmFinish && (
+        <Modal onClose={() => setConfirmFinish(false)}>
+          <div className="px-5 py-5">
+            <h3 className="text-lg font-bold">Finish event?</h3>
+            <p className="mt-1 text-sm text-ink-500">
+              Ratings are already saved after each match — finishing just closes the event and moves
+              it to history. Promotions/relegations stay reflected on the leaderboard.
+            </p>
+          </div>
+          <div className="flex gap-2 border-t border-ink-800 px-5 py-4">
+            <button onClick={() => setConfirmFinish(false)} className="flex-1 rounded-lg bg-ink-800 py-2.5 text-sm font-semibold text-ink-300">Keep open</button>
+            <button onClick={async () => { await finishEvent(detail.event.id); await store.refresh(); setConfirmFinish(false) }} className="flex-1 rounded-lg bg-brand py-2.5 text-sm font-bold text-ink-900">
+              Finish & archive
+            </button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  )
+}
+
+function LeagueCard({
+  league,
+  matches,
+  store,
+  onSelect,
+  onChanged,
+}: {
+  league: LeagueWithPlayers
+  matches: Match[]
+  store: Store
+  onSelect: (id: string) => void
+  onChanged: () => void
+}) {
+  const [openKey, setOpenKey] = useState<string | null>(null)
+  const fx = fixtures(league)
+  const played = fx.filter((f) => findMatch(matches, f[0].id, f[1].id)).length
+  const standings = computeStandings(league, matches)
+
+  return (
+    <div className="overflow-hidden rounded-xl bg-ink-850 ring-1 ring-ink-700">
+      <div className="flex items-center justify-between px-4 py-3" style={{ background: `linear-gradient(90deg, ${league.color}22, transparent)` }}>
+        <div className="flex items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full" style={{ background: league.color }} />
+          <span className="font-bold">{league.name}</span>
+          <span className="text-[11px] text-ink-500">{league.format}</span>
+        </div>
+        <span className="text-xs font-semibold text-ink-500">{played}/{fx.length} played</span>
+      </div>
+
+      {/* standings */}
+      <div className="px-2 py-1">
+        <div className="grid grid-cols-[20px_1fr_28px_28px_36px] gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
+          <span></span><span>Player</span><span className="text-center">P</span><span className="text-center">W</span><span className="text-right">+/-</span>
+        </div>
+        {standings.map((s, i) => (
+          <button key={s.player.id} onClick={() => onSelect(s.player.id)} className="grid w-full grid-cols-[20px_1fr_28px_28px_36px] items-center gap-1 rounded-md px-2 py-1.5 text-left text-sm hover:bg-ink-800">
+            <span className="text-center text-xs font-bold text-ink-500">{i + 1}</span>
+            <span className="flex min-w-0 items-center gap-2">
+              <Avatar name={s.player.name} size={22} />
+              <span className="truncate font-semibold">{s.player.name}</span>
+            </span>
+            <span className="text-center font-mono text-xs text-ink-500">{s.played}</span>
+            <span className="text-center font-mono text-xs text-win">{s.wins}</span>
+            <span className="text-right font-mono text-xs" style={{ color: s.diff > 0 ? '#32d74b' : s.diff < 0 ? '#ff453a' : '#7c8696' }}>{s.diff > 0 ? '+' : ''}{s.diff}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* fixtures */}
+      <div className="border-t border-ink-800 px-2 py-2">
+        <div className="mb-1 px-2 text-[10px] font-semibold uppercase tracking-wide text-ink-500">Fixtures</div>
+        <div className="space-y-1">
+          {fx.map((f) => {
+            const m = findMatch(matches, f[0].id, f[1].id)
+            const key = `${f[0].id}:${f[1].id}`
+            return (
+              <FixtureRow
+                key={key}
+                a={f[0]}
+                b={f[1]}
+                match={m}
+                open={openKey === key}
+                onToggle={() => setOpenKey(openKey === key ? null : key)}
+                format={league.format === 'pools→playoff' ? '1 set to 11' : league.format}
+                leagueId={league.id}
+                eventId={league.eventId}
+                store={store}
+                onDone={() => { setOpenKey(null); onChanged() }}
+              />
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function FixtureRow({
+  a,
+  b,
+  match,
+  open,
+  onToggle,
+  format,
+  leagueId,
+  eventId,
+  store,
+  onDone,
+}: {
+  a: Player
+  b: Player
+  match?: Match
+  open: boolean
+  onToggle: () => void
+  format: string
+  leagueId: string
+  eventId: string
+  store: Store
+  onDone: () => void
+}) {
+  const [sa, setSa] = useState(11)
+  const [sb, setSb] = useState(7)
+  const [busy, setBusy] = useState(false)
+
+  if (match) {
+    const aWon = match.winnerId === a.id
+    const aScore = match.playerAId === a.id ? match.scoreA : match.scoreB
+    const bScore = match.playerAId === a.id ? match.scoreB : match.scoreA
+    return (
+      <div className="flex items-center gap-2 rounded-lg bg-ink-800/50 px-3 py-2 text-sm">
+        <span className={`flex-1 truncate text-right ${aWon ? 'font-bold' : 'text-ink-500'}`}>{a.name}</span>
+        <span className="font-mono font-bold">{aScore}</span>
+        <span className="text-ink-600">:</span>
+        <span className="font-mono font-bold">{bScore}</span>
+        <span className={`flex-1 truncate ${!aWon ? 'font-bold' : 'text-ink-500'}`}>{b.name}</span>
+        <span className="text-win">✓</span>
+      </div>
+    )
+  }
+
+  if (!open) {
+    return (
+      <button onClick={onToggle} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-ink-800">
+        <span className="flex-1 truncate text-right">{a.name}</span>
+        <span className="rounded bg-ink-700 px-2 py-0.5 text-[11px] font-semibold text-ink-300">vs</span>
+        <span className="flex-1 truncate">{b.name}</span>
+        <span className="text-[11px] font-semibold text-brand-400">enter</span>
+      </button>
+    )
+  }
+
+  const tie = sa === sb
+  async function save() {
+    if (tie) return
+    setBusy(true)
+    try {
+      const aWon = sa > sb
+      await store.recordMatch({
+        winnerId: aWon ? a.id : b.id,
+        loserId: aWon ? b.id : a.id,
+        winnerScore: Math.max(sa, sb),
+        loserScore: Math.min(sa, sb),
+        format,
+        eventId,
+        leagueId,
+      })
+      onDone()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="rounded-lg bg-ink-800 p-3 ring-1 ring-brand/30">
+      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+        <div className="truncate text-right text-sm font-semibold">{a.name}</div>
+        <div className="text-[11px] text-ink-500">{format}</div>
+        <div className="truncate text-sm font-semibold">{b.name}</div>
+      </div>
+      <div className="mt-2 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+        <Score value={sa} set={setSa} />
+        <span className="text-ink-600">:</span>
+        <Score value={sb} set={setSb} />
+      </div>
+      <div className="mt-2 flex gap-2">
+        <button onClick={onToggle} className="flex-1 rounded-lg bg-ink-700 py-2 text-xs font-semibold text-ink-300">Cancel</button>
+        <button onClick={save} disabled={busy || tie} className="flex-1 rounded-lg bg-brand py-2 text-xs font-bold text-ink-900 disabled:opacity-40">
+          {busy ? 'Saving…' : 'Save result'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function Score({ value, set }: { value: number; set: (v: number) => void }) {
+  return (
+    <div className="flex items-center justify-center gap-1.5">
+      <button onClick={() => set(Math.max(0, value - 1))} className="grid h-8 w-8 place-items-center rounded-lg bg-ink-900 text-lg font-bold text-ink-500">−</button>
+      <span className="w-9 text-center font-mono text-xl font-extrabold">{value}</span>
+      <button onClick={() => set(value + 1)} className="grid h-8 w-8 place-items-center rounded-lg bg-ink-900 text-lg font-bold text-ink-500">+</button>
+    </div>
+  )
+}
+
+// ───────────────────────── helpers ─────────────────────────
+
+function fixtures(league: LeagueWithPlayers): [Player, Player][] {
+  const rounds = roundRobin(league.players.map((_, i) => i))
+  const out: [Player, Player][] = []
+  for (const round of rounds) for (const [i, j] of round) out.push([league.players[i], league.players[j]])
+  return out
+}
+
+function findMatch(matches: Match[], aId: string, bId: string): Match | undefined {
+  return matches.find(
+    (m) =>
+      (m.playerAId === aId && m.playerBId === bId) || (m.playerAId === bId && m.playerBId === aId),
+  )
+}
+
+interface Standing {
+  player: Player
+  played: number
+  wins: number
+  diff: number
+}
+
+function computeStandings(league: LeagueWithPlayers, matches: Match[]): Standing[] {
+  const ids = new Set(league.players.map((p) => p.id))
+  const leagueMatches = matches.filter((m) => ids.has(m.playerAId) && ids.has(m.playerBId))
+  const rows: Standing[] = league.players.map((player) => {
+    let played = 0
+    let wins = 0
+    let diff = 0
+    for (const m of leagueMatches) {
+      if (m.playerAId !== player.id && m.playerBId !== player.id) continue
+      played++
+      const mine = m.playerAId === player.id ? m.scoreA : m.scoreB
+      const theirs = m.playerAId === player.id ? m.scoreB : m.scoreA
+      diff += mine - theirs
+      if (m.winnerId === player.id) wins++
+    }
+    return { player, played, wins, diff }
+  })
+  return rows.sort((a, b) => b.wins - a.wins || b.diff - a.diff || b.player.elo - a.player.elo)
+}
+
+function Mini({ label, value, set, min, max, step = 1 }: { label: string; value: number; set: (v: number) => void; min: number; max: number; step?: number }) {
+  const clamp = (v: number) => Math.max(min, Math.min(max, v))
+  return (
+    <div className="rounded-lg bg-ink-900 px-2 py-1.5 ring-1 ring-ink-700">
+      <div className="text-[10px] uppercase tracking-wide text-ink-500">{label}</div>
+      <div className="flex items-center justify-between">
+        <button onClick={() => set(clamp(value - step))} className="text-ink-500">−</button>
+        <span className="font-mono text-sm font-bold">{value}</span>
+        <button onClick={() => set(clamp(value + step))} className="text-ink-500">+</button>
+      </div>
+    </div>
+  )
+}
+
+function MethodCard({
+  active,
+  onClick,
+  title,
+  desc,
+  icon,
+}: {
+  active: boolean
+  onClick: () => void
+  title: string
+  desc: string
+  icon: string
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="rounded-lg p-3 text-left transition"
+      style={{
+        background: active ? '#ff550018' : '#13171e',
+        boxShadow: active ? 'inset 0 0 0 1px #ff5500aa' : 'inset 0 0 0 1px #1d2430',
+      }}
+    >
+      <div className="flex items-center gap-1.5">
+        <span>{icon}</span>
+        <span className="text-sm font-bold" style={{ color: active ? '#ff7a33' : '#e7ebf0' }}>{title}</span>
+      </div>
+      <div className="mt-1 text-[11px] leading-snug text-ink-500">{desc}</div>
+    </button>
+  )
+}
+
+function Kpi({ label, value, ok }: { label: string; value: string; ok?: boolean }) {
+  const color = ok === undefined ? '#fff' : ok ? '#32d74b' : '#ff8a2a'
+  return (
+    <div className="rounded-xl bg-ink-850 px-4 py-3 ring-1 ring-ink-800">
+      <div className="text-[11px] uppercase tracking-wide text-ink-500">{label}</div>
+      <div className="font-mono text-xl font-extrabold" style={{ color }}>{value}</div>
+    </div>
+  )
+}
