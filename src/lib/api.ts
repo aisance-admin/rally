@@ -49,6 +49,7 @@ const toEvent = (r: Row): LeagueEvent => ({
   date: r.date,
   tables: r.tables,
   durationMin: r.duration_min,
+  season: r.duration_min ?? 1,
   participantIds: (r.rally_event_participants ?? []).map((p: Row) => p.player_id),
   status: r.status,
 })

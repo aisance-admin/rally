@@ -13,6 +13,8 @@ import {
 import { Avatar } from './bits'
 import { SkillBadge } from './SkillBadge'
 import { Modal } from './Modal'
+import { SeasonDraft } from './SeasonDraft'
+import { groupSeries } from '../lib/seasons'
 
 const LEAGUE_NAMES = ['Elite', 'Division 1', 'Division 2', 'Division 3', 'Division 4', 'Division 5', 'Division 6']
 const LEAGUE_COLORS = ['#ff2d55', '#ff6321', '#f0a93b', '#5ec26a', '#9aa4b2', '#6ea8ff', '#b06eff']
@@ -21,6 +23,8 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
   const liveEvent = store.events.find((e) => e.status === 'live' || e.status === 'qualifying')
   const [detail, setDetail] = useState<EventDetail | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
+  const [view, setView] = useState<'hub' | 'setup' | 'draft'>('hub')
+  const [draftPrev, setDraftPrev] = useState<EventDetail | null>(null)
 
   const refreshDetail = async (id: string) => {
     setLoadingDetail(true)
@@ -59,7 +63,125 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
     )
   }
 
-  return <Setup store={store} onStarted={(id) => refreshDetail(id)} />
+  if (view === 'draft' && draftPrev) {
+    return (
+      <SeasonDraft
+        store={store}
+        prev={draftPrev}
+        onStarted={(id) => { setView('hub'); refreshDetail(id) }}
+        onCancel={() => setView('hub')}
+      />
+    )
+  }
+
+  if (view === 'setup') {
+    return (
+      <Setup
+        store={store}
+        onStarted={(id) => { setView('hub'); refreshDetail(id) }}
+        onCancel={store.events.length ? () => setView('hub') : undefined}
+      />
+    )
+  }
+
+  return (
+    <SeasonHub
+      store={store}
+      onNewSeries={() => setView('setup')}
+      onStartNext={async (prevId) => { setDraftPrev(await fetchEventDetail(prevId)); setView('draft') }}
+    />
+  )
+}
+
+// ───────────────────────── season hub ─────────────────────────
+
+function SeasonHub({
+  store,
+  onNewSeries,
+  onStartNext,
+}: {
+  store: Store
+  onNewSeries: () => void
+  onStartNext: (prevEventId: string) => void
+}) {
+  const series = groupSeries(store.events)
+
+  if (store.players.length === 0) {
+    return (
+      <div className="grid place-items-center rounded-xl border border-dashed border-ink-600 py-16 text-center">
+        <div className="text-4xl">📅</div>
+        <div className="mt-3 text-lg font-semibold">No roster yet</div>
+        <div className="mt-1 max-w-sm text-sm text-ink-500">
+          Add players in the <span className="font-semibold text-brand">Roster</span> tab (or load the sample roster) before starting a league.
+        </div>
+      </div>
+    )
+  }
+
+  if (series.length === 0) {
+    return (
+      <div className="grid place-items-center rounded-xl border border-dashed border-ink-600 py-16 text-center">
+        <div className="text-4xl">🏆</div>
+        <div className="mt-3 text-lg font-semibold">No leagues yet</div>
+        <div className="mt-1 max-w-sm text-sm text-ink-500">Start a league and play seasons — each new season re-seeds players by the previous results.</div>
+        <button onClick={onNewSeries} className="mt-4 rounded-lg bg-brand px-4 py-2.5 text-sm font-bold text-ink-900">＋ Start a league</button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="animate-fade space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-bold uppercase tracking-wider text-ink-500">Leagues & seasons</h2>
+        <button onClick={onNewSeries} className="rounded-lg bg-ink-800 px-3 py-2 text-xs font-semibold text-ink-300 ring-1 ring-ink-700 hover:text-white">＋ New league</button>
+      </div>
+
+      {series.map((s) => {
+        const latest = s.seasons[s.seasons.length - 1]
+        const canStartNext = latest.status === 'done'
+        return (
+          <div key={s.name} className="overflow-hidden rounded-xl bg-ink-850 ring-1 ring-ink-700">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+              <div>
+                <div className="font-bold">{s.name}</div>
+                <div className="text-xs text-ink-500">{s.seasons.length} season{s.seasons.length === 1 ? '' : 's'}</div>
+              </div>
+              {canStartNext && (
+                <button onClick={() => onStartNext(latest.id)} className="rounded-lg bg-brand px-3 py-2 text-xs font-bold text-ink-900 hover:bg-brand-400">
+                  ⚡ Start Season {latest.season + 1}
+                </button>
+              )}
+            </div>
+            <div className="divide-y divide-ink-800 border-t border-ink-800">
+              {[...s.seasons].reverse().map((ev) => (
+                <div key={ev.id} className="flex w-full items-center gap-3 px-4 py-2.5 text-left">
+                  <span className="grid h-7 w-7 place-items-center rounded-lg bg-ink-800 font-mono text-xs font-bold text-ink-300">S{ev.season}</span>
+                  <span className="flex-1 text-sm font-semibold">Season {ev.season}</span>
+                  <span className="text-xs text-ink-500">{ev.participantIds.length} players · {ev.tables} divisions</span>
+                  <StatusPill status={ev.status} />
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function StatusPill({ status }: { status: string }) {
+  const map: Record<string, { c: string; t: string }> = {
+    done: { c: '#9aa4b2', t: 'Done' },
+    live: { c: '#32d74b', t: 'Live' },
+    qualifying: { c: '#ff7a33', t: 'Qualifier' },
+    draft: { c: '#6ea8ff', t: 'Draft' },
+  }
+  const s = map[status] ?? map.draft
+  return (
+    <span className="rounded px-1.5 py-0.5 text-[11px] font-bold uppercase" style={{ background: `${s.c}22`, color: s.c }}>
+      {s.t}
+    </span>
+  )
 }
 
 // ───────────────────────── qualification round ─────────────────────────
@@ -226,7 +348,7 @@ function QualifierRow({
 
 // ───────────────────────── setup / generation ─────────────────────────
 
-function Setup({ store, onStarted }: { store: Store; onStarted: (id: string) => void }) {
+function Setup({ store, onStarted, onCancel }: { store: Store; onStarted: (id: string) => void; onCancel?: () => void }) {
   const [name, setName] = useState('League Night')
   const [method, setMethod] = useState<'elo' | 'qualifier'>('elo')
   // Track who is OUT (default: everyone checked in; roster changes auto-include).
@@ -259,8 +381,8 @@ function Setup({ store, onStarted }: { store: Store; onStarted: (id: string) => 
     setBusy(true)
     try {
       const players = store.players.filter((p) => isIn(p.id))
-      // `tables` column is repurposed to remember the chosen league count.
-      const config = { name: name.trim() || 'League Night', tables: leagues, durationMin: 120, setMinutes: 8, withQualifier: method === 'qualifier' }
+      // `tables` = league count, `durationMin` = season number (this is Season 1).
+      const config = { name: name.trim() || 'League Night', tables: leagues, durationMin: 1, setMinutes: 8, withQualifier: method === 'qualifier' }
       const id =
         method === 'qualifier'
           ? await createQualifierEvent(config, players)
@@ -290,8 +412,11 @@ function Setup({ store, onStarted }: { store: Store; onStarted: (id: string) => 
       {/* config + check-in */}
       <div className="space-y-4">
         <div className="space-y-3 rounded-xl bg-ink-850 p-5 ring-1 ring-ink-700">
-          <h2 className="text-sm font-bold uppercase tracking-wider text-ink-500">New event</h2>
-          <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-lg bg-ink-900 px-3 py-2 text-sm font-semibold outline-none ring-1 ring-ink-700" placeholder="Event name" />
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-bold uppercase tracking-wider text-ink-500">New league · Season 1</h2>
+            {onCancel && <button onClick={onCancel} className="text-xs font-semibold text-ink-500 hover:text-white">← back</button>}
+          </div>
+          <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-lg bg-ink-900 px-3 py-2 text-sm font-semibold outline-none ring-1 ring-ink-700" placeholder="League name (e.g. Thursday Night)" />
           <div>
             <div className="mb-1.5 text-[11px] uppercase tracking-wide text-ink-500">How to split players into leagues</div>
             <div className="grid grid-cols-2 gap-2">
@@ -433,6 +558,7 @@ function LiveEvent({
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 animate-pulse rounded-full bg-win" />
             <span className="font-extrabold">{detail.event.name}</span>
+            <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[11px] font-bold uppercase text-ink-300">Season {detail.event.season}</span>
             <span className="rounded bg-win/15 px-1.5 py-0.5 text-[11px] font-bold uppercase text-win">Live</span>
           </div>
           <div className="mt-0.5 text-xs text-ink-500">

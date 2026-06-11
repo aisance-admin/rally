@@ -190,6 +190,7 @@ export async function fetchEventDetail(eventId: string): Promise<EventDetail> {
       date: e.date,
       tables: e.tables,
       durationMin: e.duration_min,
+      season: e.duration_min ?? 1,
       participantIds: parts.map((p) => p.player_id),
       status: e.status,
     },

@@ -43,10 +43,11 @@ export type EventStatus = 'draft' | 'qualifying' | 'live' | 'done'
 
 export interface LeagueEvent {
   id: ID
-  name: string
+  name: string // series name (shared across seasons)
   date: string // ISO
-  tables: number
-  durationMin: number
+  tables: number // repurposed: number of leagues/divisions
+  durationMin: number // repurposed: season number
+  season: number
   participantIds: ID[]
   status: EventStatus
 }
