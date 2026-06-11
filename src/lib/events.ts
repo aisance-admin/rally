@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import { leagueSizes } from './planner'
+import { manualSizes } from './planner'
 import type { EventDetail, LeagueWithPlayers, Match, Player } from '../types'
 
 const DIV_PRESET = [
@@ -67,9 +67,9 @@ async function insertEvent(config: EventConfig, status: string): Promise<string>
 }
 
 /** Create tiered leagues (Elite, Div 1, …) from a rank-sorted player list and
- *  (re)assign participants into them. Used by both ELO-seed and qualifier modes. */
-async function buildTieredLeagues(eventId: string, ranked: Player[]): Promise<void> {
-  const sizes = leagueSizes(ranked.length)
+ *  (re)assign participants into them. The admin sets `numLeagues` manually. */
+async function buildTieredLeagues(eventId: string, ranked: Player[], numLeagues: number): Promise<void> {
+  const sizes = manualSizes(ranked.length, numLeagues)
   const leaguePayload = sizes.map((size, i) => {
     const preset = DIV_PRESET[i] ?? { name: `League ${i + 1}`, color: '#9aa4b2' }
     const format = size === 5 ? 'pools→playoff' : i === 0 ? 'Best of 3 to 11' : '1 set to 11'
@@ -97,14 +97,15 @@ async function buildTieredLeagues(eventId: string, ranked: Player[]): Promise<vo
   if (pErr) throw pErr
 }
 
-/** Mode A — seed leagues directly by current ELO / leaderboard rank. */
+/** Mode A — seed `numLeagues` leagues directly by current ELO / leaderboard rank. */
 export async function createEventWithLeagues(
   config: EventConfig,
   participants: Player[],
+  numLeagues: number,
 ): Promise<string> {
   const ranked = [...participants].sort((a, b) => b.elo - a.elo)
   const eventId = await insertEvent(config, 'live')
-  await buildTieredLeagues(eventId, ranked)
+  await buildTieredLeagues(eventId, ranked, numLeagues)
   return eventId
 }
 
@@ -135,8 +136,8 @@ export async function createQualifierEvent(
 }
 
 /** Mode B (step 2) — after qualifier matches, rank by (now-calibrated) ELO,
- *  build the tiered leagues, drop the qualifier pool, and go live. */
-export async function promoteQualifierToLeagues(eventId: string): Promise<void> {
+ *  build the chosen number of tiered leagues, drop the qualifier pool, and go live. */
+export async function promoteQualifierToLeagues(eventId: string, numLeagues: number): Promise<void> {
   const partRes = await supabase
     .from('rally_event_participants')
     .select('player_id')
@@ -146,7 +147,7 @@ export async function promoteQualifierToLeagues(eventId: string): Promise<void> 
   const plRes = await supabase.from('rally_players').select('*').in('id', ids)
   const ranked = (plRes.data ?? []).map(toPlayer).sort((a, b) => b.elo - a.elo)
 
-  await buildTieredLeagues(eventId, ranked)
+  await buildTieredLeagues(eventId, ranked, numLeagues)
   // remove the qualifier pool (tier 0); its matches keep event_id, league_id -> null
   await supabase.from('rally_leagues').delete().eq('event_id', eventId).eq('tier', 0)
   await supabase.from('rally_events').update({ status: 'live' }).eq('id', eventId)

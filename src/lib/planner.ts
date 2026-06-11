@@ -62,6 +62,14 @@ export function leagueSizes(n: number): number[] {
   return distribute(n, chooseLeagueCount(n))
 }
 
+/** Manual sizing: split `count` players into exactly `numLeagues` even leagues
+ *  (sizes differ by at most 1), largest first. Clamped so there are no empty leagues. */
+export function manualSizes(count: number, numLeagues: number): number[] {
+  if (count <= 0) return []
+  const L = Math.max(1, Math.min(Math.round(numLeagues), count))
+  return distribute(count, L)
+}
+
 /** Round-robin schedule (circle method). Returns rounds of [i,j] index pairs. */
 export function roundRobin(playerIdx: number[]): [number, number][][] {
   const ids = [...playerIdx]

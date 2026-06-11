@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { EventDetail, LeagueWithPlayers, Match, Player } from '../types'
 import type { Store } from '../lib/store'
-import { planEvent, roundRobin } from '../lib/planner'
+import { manualSizes, roundRobin } from '../lib/planner'
 import {
   createEventWithLeagues,
   createQualifierEvent,
@@ -13,6 +13,9 @@ import {
 import { Avatar } from './bits'
 import { SkillBadge } from './SkillBadge'
 import { Modal } from './Modal'
+
+const LEAGUE_NAMES = ['Elite', 'Division 1', 'Division 2', 'Division 3', 'Division 4', 'Division 5', 'Division 6']
+const LEAGUE_COLORS = ['#ff2d55', '#ff6321', '#f0a93b', '#5ec26a', '#9aa4b2', '#6ea8ff', '#b06eff']
 
 export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: string) => void }) {
   const liveEvent = store.events.find((e) => e.status === 'live' || e.status === 'qualifying')
@@ -96,6 +99,11 @@ function QualifierView({
   const [busy, setBusy] = useState(false)
   const pool = detail.leagues[0]
   const players = pool?.players ?? []
+  const [numLeagues, setNumLeagues] = useState(() =>
+    Math.max(1, Math.min(detail.event.tables || 4, Math.max(1, players.length))),
+  )
+  const leagues = Math.min(Math.max(1, numLeagues), Math.max(1, players.length))
+  const sizes = manualSizes(players.length, leagues)
   const { pairs, bye } = qualifierPairings(players, detail.event.id)
   const played = pairs.filter((f) => findMatch(detail.matches, f[0].id, f[1].id)).length
   const allDone = played === pairs.length
@@ -103,7 +111,7 @@ function QualifierView({
   async function build() {
     setBusy(true)
     try {
-      await promoteQualifierToLeagues(detail.event.id)
+      await promoteQualifierToLeagues(detail.event.id, leagues)
       await store.refresh()
       onChanged()
     } finally {
@@ -120,10 +128,16 @@ function QualifierView({
             <span className="rounded bg-brand/15 px-1.5 py-0.5 text-[11px] font-bold uppercase text-brand-400">Qualifier</span>
           </div>
           <div className="mt-0.5 text-xs text-ink-500">
-            Random pairings · {played}/{pairs.length} played · then split into leagues by result
+            Random pairings · {played}/{pairs.length} played · → {leagues} leagues ({sizes.join('·') || '—'})
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5 rounded-lg bg-ink-800 px-2 py-1.5 ring-1 ring-ink-700">
+            <span className="text-[11px] uppercase tracking-wide text-ink-500">Leagues</span>
+            <button onClick={() => setNumLeagues(Math.max(1, leagues - 1))} className="grid h-6 w-6 place-items-center rounded bg-ink-900 font-bold text-ink-400 hover:text-white">−</button>
+            <span className="w-5 text-center font-mono font-bold">{leagues}</span>
+            <button onClick={() => setNumLeagues(Math.min(Math.max(1, players.length), leagues + 1))} className="grid h-6 w-6 place-items-center rounded bg-ink-900 font-bold text-ink-400 hover:text-white">+</button>
+          </div>
           <button
             onClick={async () => { await deleteEvent(detail.event.id); await store.refresh() }}
             className="rounded-lg px-3 py-2 text-xs font-semibold text-ink-500 ring-1 ring-ink-700 hover:text-loss"
@@ -136,7 +150,7 @@ function QualifierView({
             title={allDone ? '' : 'Some qualifier matches are still open — leagues use current ratings'}
             className="rounded-lg bg-brand px-3 py-2 text-xs font-bold text-ink-900 hover:bg-brand-400 disabled:opacity-40"
           >
-            {busy ? 'Building…' : '⚡ Build leagues from results'}
+            {busy ? 'Building…' : `⚡ Build ${leagues} leagues`}
           </button>
         </div>
       </div>
@@ -214,22 +228,24 @@ function QualifierRow({
 
 function Setup({ store, onStarted }: { store: Store; onStarted: (id: string) => void }) {
   const [name, setName] = useState('League Night')
-  const [tables, setTables] = useState(15)
-  const [duration, setDuration] = useState(120)
-  const [setMinutes, setSetMinutes] = useState(8)
   const [method, setMethod] = useState<'elo' | 'qualifier'>('elo')
-  const withQualifier = method === 'qualifier'
   // Track who is OUT (default: everyone checked in; roster changes auto-include).
   const [unchecked, setUnchecked] = useState<Set<string>>(() => new Set())
+  const [numLeagues, setNumLeagues] = useState(4)
   const [busy, setBusy] = useState(false)
 
   const roster = useMemo(() => [...store.players].sort((a, b) => b.elo - a.elo), [store.players])
   const isIn = (id: string) => !unchecked.has(id)
   const count = roster.filter((p) => isIn(p.id)).length
-  const plan = useMemo(
-    () => planEvent(count, tables, duration, { withQualifier, setMinutes }),
-    [count, tables, duration, withQualifier, setMinutes],
-  )
+
+  const maxLeagues = Math.max(1, count)
+  const leagues = Math.min(Math.max(1, numLeagues), maxLeagues)
+  const sizes = manualSizes(count, leagues)
+  const perLeague = leagues > 0 ? Math.round(count / leagues) : 0
+  const minSize = sizes.length ? Math.min(...sizes) : 0
+  const setPerLeague = (per: number) => {
+    if (per > 0 && count > 0) setNumLeagues(Math.max(1, Math.min(count, Math.round(count / per))))
+  }
 
   const toggle = (id: string) =>
     setUnchecked((s) => {
@@ -239,15 +255,16 @@ function Setup({ store, onStarted }: { store: Store; onStarted: (id: string) => 
     })
 
   async function start() {
-    if (count < 3) return
+    if (count < 2) return
     setBusy(true)
     try {
       const players = store.players.filter((p) => isIn(p.id))
-      const config = { name: name.trim() || 'League Night', tables, durationMin: duration, setMinutes, withQualifier }
+      // `tables` column is repurposed to remember the chosen league count.
+      const config = { name: name.trim() || 'League Night', tables: leagues, durationMin: 120, setMinutes: 8, withQualifier: method === 'qualifier' }
       const id =
         method === 'qualifier'
           ? await createQualifierEvent(config, players)
-          : await createEventWithLeagues(config, players)
+          : await createEventWithLeagues(config, players, leagues)
       await store.refresh()
       onStarted(id)
     } finally {
@@ -275,11 +292,6 @@ function Setup({ store, onStarted }: { store: Store; onStarted: (id: string) => 
         <div className="space-y-3 rounded-xl bg-ink-850 p-5 ring-1 ring-ink-700">
           <h2 className="text-sm font-bold uppercase tracking-wider text-ink-500">New event</h2>
           <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-lg bg-ink-900 px-3 py-2 text-sm font-semibold outline-none ring-1 ring-ink-700" placeholder="Event name" />
-          <div className="grid grid-cols-3 gap-2">
-            <Mini label="Tables" value={tables} set={setTables} min={1} max={30} />
-            <Mini label="Minutes" value={duration} set={setDuration} min={30} max={300} step={15} />
-            <Mini label="Set min" value={setMinutes} set={setSetMinutes} min={4} max={25} />
-          </div>
           <div>
             <div className="mb-1.5 text-[11px] uppercase tracking-wide text-ink-500">How to split players into leagues</div>
             <div className="grid grid-cols-2 gap-2">
@@ -299,6 +311,20 @@ function Setup({ store, onStarted }: { store: Store; onStarted: (id: string) => 
               />
             </div>
           </div>
+        </div>
+
+        <div className="space-y-3 rounded-xl bg-ink-850 p-5 ring-1 ring-ink-700">
+          <h2 className="text-sm font-bold uppercase tracking-wider text-ink-500">League structure</h2>
+          <div className="grid grid-cols-2 gap-3">
+            <NumControl label="Number of leagues" value={leagues} min={1} max={maxLeagues} onChange={setNumLeagues} />
+            <NumControl label="Players / league" value={perLeague} min={1} max={Math.max(1, count)} onChange={setPerLeague} />
+          </div>
+          <p className="text-[11px] text-ink-500">
+            {count} checked in → sizes <span className="font-mono text-ink-300">{sizes.join(' · ') || '—'}</span>
+          </p>
+          {minSize < 2 && count >= 2 && (
+            <p className="rounded-lg bg-brand/10 px-2.5 py-1.5 text-[11px] text-brand-400">⚠ Some leagues would have fewer than 2 players — lower the league count.</p>
+          )}
         </div>
 
         <div className="overflow-hidden rounded-xl bg-ink-850 ring-1 ring-ink-700">
@@ -325,59 +351,54 @@ function Setup({ store, onStarted }: { store: Store; onStarted: (id: string) => 
         </div>
       </div>
 
-      {/* plan preview + start */}
+      {/* preview + start */}
       <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-3 gap-3">
           <Kpi label="Players" value={String(count)} />
-          <Kpi label="Leagues" value={String(plan.leagues.length)} />
-          <Kpi label="Est. time" value={`${plan.totalMinutes}m`} ok={plan.fits} />
-          <Kpi label="Finish spread" value={`±${plan.finishSpreadMin}m`} ok={plan.finishSpreadMin <= setMinutes} />
+          <Kpi label="Leagues" value={String(leagues)} />
+          <Kpi label="Players / league" value={String(perLeague)} />
         </div>
-        {plan.warnings.map((w, i) => (
-          <div key={i} className="rounded-lg bg-brand/10 px-3 py-2 text-xs text-brand-400 ring-1 ring-brand/30">⚠ {w}</div>
-        ))}
+
+        {method === 'qualifier' && (
+          <div className="rounded-lg bg-brand/10 px-3 py-2 text-xs text-brand-400 ring-1 ring-brand/30">
+            🎲 A random qualifier round runs first. You confirm the {leagues} leagues afterwards, split by result.
+          </div>
+        )}
 
         <div className="overflow-hidden rounded-xl ring-1 ring-ink-700">
-          <div className="grid grid-cols-[1fr_70px_70px_70px] gap-2 bg-ink-850 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-ink-500">
-            <span>Proposed league</span><span className="text-center">Players</span><span className="text-center">Matches</span><span className="text-right">Time</span>
+          <div className="grid grid-cols-[1fr_90px] gap-2 bg-ink-850 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-ink-500">
+            <span>{method === 'qualifier' ? 'League (after qualifier)' : 'League'}</span>
+            <span className="text-right">Players</span>
           </div>
           <div className="divide-y divide-ink-800">
-            {plan.qualifierMinutes > 0 && (
-              <div className="grid grid-cols-[1fr_70px_70px_70px] gap-2 px-4 py-2.5 text-sm">
-                <span className="font-semibold text-brand-400">Qualification</span>
-                <span className="text-center text-ink-500">{count}</span><span className="text-center text-ink-500">—</span>
-                <span className="text-right font-mono">{plan.qualifierMinutes}m</span>
-              </div>
-            )}
-            {plan.leagues.map((l, i) => (
-              <div key={i} className="grid grid-cols-[1fr_70px_70px_70px] items-center gap-2 px-4 py-2.5 text-sm">
-                <span className="font-semibold">{['Elite','Division 1','Division 2','Division 3','Division 4','Division 5'][i] ?? `League ${i+1}`}{l.size===5 && <span className="ml-1 text-[10px] text-ink-500">pools→playoff</span>}</span>
-                <span className="text-center font-mono">{l.size}</span>
-                <span className="text-center font-mono text-ink-500">{l.matches}</span>
-                <span className="text-right font-mono">{l.estMinutes}m</span>
+            {sizes.map((sz, i) => (
+              <div key={i} className="grid grid-cols-[1fr_90px] items-center gap-2 px-4 py-2.5 text-sm">
+                <span className="flex items-center gap-2 font-semibold">
+                  <span className="h-2 w-2 rounded-full" style={{ background: LEAGUE_COLORS[i] ?? '#9aa4b2' }} />
+                  {LEAGUE_NAMES[i] ?? `League ${i + 1}`}
+                </span>
+                <span className="text-right font-mono">{sz}</span>
               </div>
             ))}
+            {sizes.length === 0 && (
+              <div className="px-4 py-6 text-center text-sm text-ink-500">Check in players to preview leagues.</div>
+            )}
           </div>
         </div>
 
         <button
           onClick={start}
-          disabled={busy || count < 3}
+          disabled={busy || count < 2}
           className="w-full rounded-xl bg-brand py-3.5 text-base font-extrabold text-ink-900 shadow-glow transition hover:bg-brand-400 disabled:opacity-40"
         >
           {busy
             ? 'Starting…'
-            : count < 3
-            ? 'Check in at least 3 players'
+            : count < 2
+            ? 'Check in at least 2 players'
             : method === 'qualifier'
             ? `🎲 Start qualifier · ${count} players`
-            : `⚡ Generate ${plan.leagues.length} leagues & start`}
+            : `⚡ Generate ${leagues} leagues & start`}
         </button>
-        {method === 'qualifier' && count >= 3 && (
-          <p className="text-center text-xs text-ink-500">
-            Players play one random set, then you split them into the {plan.leagues.length} leagues above by result.
-          </p>
-        )}
       </div>
     </div>
   )
@@ -729,6 +750,32 @@ function MethodCard({
       </div>
       <div className="mt-1 text-[11px] leading-snug text-ink-500">{desc}</div>
     </button>
+  )
+}
+
+function NumControl({
+  label,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string
+  value: number
+  min: number
+  max: number
+  onChange: (v: number) => void
+}) {
+  const clamp = (v: number) => Math.max(min, Math.min(max, v))
+  return (
+    <div className="rounded-lg bg-ink-900 p-3 ring-1 ring-ink-700">
+      <div className="text-[11px] uppercase tracking-wide text-ink-500">{label}</div>
+      <div className="mt-1.5 flex items-center justify-between">
+        <button onClick={() => onChange(clamp(value - 1))} className="grid h-8 w-8 place-items-center rounded-lg bg-ink-800 text-lg font-bold text-ink-400 hover:text-white">−</button>
+        <span className="font-mono text-2xl font-extrabold tabular-nums">{value}</span>
+        <button onClick={() => onChange(clamp(value + 1))} className="grid h-8 w-8 place-items-center rounded-lg bg-ink-800 text-lg font-bold text-ink-400 hover:text-white">+</button>
+      </div>
+    </div>
   )
 }
 
