@@ -14,7 +14,7 @@ import { Avatar } from './bits'
 import { SkillBadge } from './SkillBadge'
 import { Modal } from './Modal'
 import { SeasonDraft } from './SeasonDraft'
-import { groupSeries } from '../lib/seasons'
+import { groupSeries, seasonRecordsFor, type WL } from '../lib/seasons'
 
 const LEAGUE_NAMES = ['Elite', 'Division 1', 'Division 2', 'Division 3', 'Division 4', 'Division 5', 'Division 6']
 const LEAGUE_COLORS = ['#ff2d55', '#ff6321', '#f0a93b', '#5ec26a', '#9aa4b2', '#6ea8ff', '#b06eff']
@@ -25,6 +25,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [view, setView] = useState<'hub' | 'setup' | 'draft'>('hub')
   const [draftPrev, setDraftPrev] = useState<EventDetail | null>(null)
+  const [prevRecords, setPrevRecords] = useState<Map<string, WL> | null>(null)
 
   const refreshDetail = async (id: string) => {
     setLoadingDetail(true)
@@ -40,6 +41,31 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
     else setDetail(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveEvent?.id])
+
+  // Load the previous season's W/L so the live season can show "last season" records.
+  useEffect(() => {
+    let cancelled = false
+    async function loadPrev() {
+      if (!detail || detail.event.season <= 1 || detail.event.status === 'qualifying') {
+        setPrevRecords(null)
+        return
+      }
+      const prev = store.events.find(
+        (e) => e.name === detail.event.name && e.season === detail.event.season - 1,
+      )
+      if (!prev) {
+        setPrevRecords(null)
+        return
+      }
+      const pd = await fetchEventDetail(prev.id)
+      if (!cancelled) setPrevRecords(seasonRecordsFor(pd))
+    }
+    loadPrev()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.event.id])
 
   if (liveEvent && detail) {
     if (detail.event.status === 'qualifying') {
@@ -57,6 +83,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
         store={store}
         detail={detail}
         loading={loadingDetail}
+        prevRecords={prevRecords}
         onSelect={onSelect}
         onChanged={() => refreshDetail(liveEvent.id)}
       />
@@ -535,12 +562,14 @@ function LiveEvent({
   store,
   detail,
   loading,
+  prevRecords,
   onSelect,
   onChanged,
 }: {
   store: Store
   detail: EventDetail
   loading: boolean
+  prevRecords?: Map<string, WL> | null
   onSelect: (id: string) => void
   onChanged: () => void
 }) {
@@ -580,7 +609,7 @@ function LiveEvent({
 
       <div className="grid gap-4 lg:grid-cols-2">
         {detail.leagues.map((l) => (
-          <LeagueCard key={l.id} league={l} matches={detail.matches} store={store} onSelect={onSelect} onChanged={onChanged} />
+          <LeagueCard key={l.id} league={l} matches={detail.matches} prevRecords={prevRecords} store={store} onSelect={onSelect} onChanged={onChanged} />
         ))}
       </div>
 
@@ -610,12 +639,14 @@ function LiveEvent({
 function LeagueCard({
   league,
   matches,
+  prevRecords,
   store,
   onSelect,
   onChanged,
 }: {
   league: LeagueWithPlayers
   matches: Match[]
+  prevRecords?: Map<string, WL> | null
   store: Store
   onSelect: (id: string) => void
   onChanged: () => void
@@ -646,7 +677,14 @@ function LeagueCard({
             <span className="text-center text-xs font-bold text-ink-500">{i + 1}</span>
             <span className="flex min-w-0 items-center gap-2">
               <Avatar name={s.player.name} size={22} />
-              <span className="truncate font-semibold">{s.player.name}</span>
+              <span className="min-w-0 leading-tight">
+                <span className="block truncate font-semibold">{s.player.name}</span>
+                {prevRecords && (
+                  <span className="block text-[10px] text-ink-500">
+                    last: {prevRecords.has(s.player.id) ? `${prevRecords.get(s.player.id)!.wins}-${prevRecords.get(s.player.id)!.losses}` : 'new'}
+                  </span>
+                )}
+              </span>
             </span>
             <span className="text-center font-mono text-xs text-ink-500">{s.played}</span>
             <span className="text-center font-mono text-xs text-win">{s.wins}</span>

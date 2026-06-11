@@ -32,6 +32,50 @@ export function groupSeries(events: LeagueEvent[]): Series[] {
     })
 }
 
+export interface WL {
+  wins: number
+  losses: number
+}
+
+/** Per-player win/loss record for a single season (from that season's matches). */
+export function seasonRecords(matches: Match[]): Map<string, WL> {
+  const rec = new Map<string, WL>()
+  const get = (id: string) => {
+    let r = rec.get(id)
+    if (!r) {
+      r = { wins: 0, losses: 0 }
+      rec.set(id, r)
+    }
+    return r
+  }
+  for (const m of matches) {
+    if (!m.winnerId) continue
+    const loserId = m.playerAId === m.winnerId ? m.playerBId : m.playerAId
+    get(m.winnerId).wins++
+    get(loserId).losses++
+  }
+  return rec
+}
+
+/** Records for everyone who was IN a season (participants seeded at 0-0, then
+ *  filled from matches). Players absent from this map are genuinely new. */
+export function seasonRecordsFor(detail: EventDetail): Map<string, WL> {
+  const rec = new Map<string, WL>()
+  for (const l of detail.leagues) for (const p of l.players) rec.set(p.id, { wins: 0, losses: 0 })
+  for (const id of detail.event.participantIds) if (!rec.has(id)) rec.set(id, { wins: 0, losses: 0 })
+  for (const m of detail.matches) {
+    if (!m.winnerId) continue
+    const loserId = m.playerAId === m.winnerId ? m.playerBId : m.playerAId
+    const w = rec.get(m.winnerId) ?? { wins: 0, losses: 0 }
+    w.wins++
+    rec.set(m.winnerId, w)
+    const l = rec.get(loserId) ?? { wins: 0, losses: 0 }
+    l.losses++
+    rec.set(loserId, l)
+  }
+  return rec
+}
+
 /** Final standings order (best first) within a league, by wins → game diff → ELO. */
 export function standingsOrder(league: LeagueWithPlayers, matches: Match[]): Player[] {
   const ids = new Set(league.players.map((p) => p.id))

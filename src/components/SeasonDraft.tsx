@@ -7,6 +7,8 @@ import {
   type DraftDivision,
   LEAGUE_COLORS,
   LEAGUE_NAMES,
+  seasonRecordsFor,
+  type WL,
 } from '../lib/seasons'
 import { Avatar } from './bits'
 import { SkillBadge } from './SkillBadge'
@@ -35,6 +37,9 @@ export function SeasonDraft({
 
   const byId = useMemo(() => Object.fromEntries(store.players.map((p) => [p.id, p])), [store.players])
   const fresh = (p: Player) => byId[p.id] ?? p
+  // Each player's win/loss record from the season we're advancing from.
+  const prevRecords = useMemo(() => seasonRecordsFor(prev), [prev])
+  const prevSeasonNo = prev.event.season
 
   const inDraft = useMemo(() => {
     const s = new Set<string>()
@@ -120,7 +125,9 @@ export function SeasonDraft({
 
       <div className="rounded-lg bg-ink-800 px-3 py-2 text-xs text-ink-400">
         Default places players by last season's standings (top {promoteN} of each division move up, bottom {promoteN} move down). Adjust the
-        <span className="text-ink-300"> Up/down</span> count to recompute, or move players by hand. Ratings carry over from previous seasons.
+        <span className="text-ink-300"> Up/down</span> count to recompute, or move players by hand. The{' '}
+        <span className="text-win">W</span><span className="text-ink-500">–</span><span className="text-loss">L</span> shown is each player's{' '}
+        <span className="text-ink-300">Season {prevSeasonNo}</span> record; ratings carry over.
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -145,7 +152,7 @@ export function SeasonDraft({
                     <SkillBadge elo={p.elo} size="sm" />
                     <Avatar name={p.name} size={26} />
                     <span className="min-w-0 flex-1 truncate text-sm font-semibold">{p.name}</span>
-                    <span className="font-mono text-xs text-ink-500">{p.elo}</span>
+                    <RecordChip rec={prevRecords.get(p.id)} elo={p.elo} />
                     <div className="flex items-center gap-0.5">
                       <IconBtn label="Move up a division" disabled={i === 0} onClick={() => move(i, p.id, i - 1)}>▲</IconBtn>
                       <IconBtn label="Move down a division" disabled={i === divisions.length - 1} onClick={() => move(i, p.id, i + 1)}>▼</IconBtn>
@@ -179,7 +186,7 @@ export function SeasonDraft({
                 <SkillBadge elo={p.elo} size="sm" />
                 <Avatar name={p.name} size={26} />
                 <span className="min-w-0 flex-1 truncate text-sm font-semibold">{p.name}</span>
-                <span className="font-mono text-xs text-ink-500">{p.elo}</span>
+                <RecordChip rec={prevRecords.get(p.id)} elo={p.elo} />
                 <div className="flex flex-wrap gap-1">
                   {divisions.map((d, i) => (
                     <button key={i} onClick={() => addToDivision(p, i)} className="rounded px-2 py-1 text-[11px] font-semibold" style={{ background: `${d.color}1f`, color: d.color }}>
@@ -192,6 +199,23 @@ export function SeasonDraft({
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+function RecordChip({ rec, elo }: { rec?: WL; elo: number }) {
+  return (
+    <div className="text-right leading-tight" title="Last season W–L · rating">
+      {rec ? (
+        <div className="font-mono text-xs font-semibold">
+          <span className="text-win">{rec.wins}</span>
+          <span className="text-ink-600">-</span>
+          <span className="text-loss">{rec.losses}</span>
+        </div>
+      ) : (
+        <div className="text-[10px] font-bold uppercase text-brand-400">new</div>
+      )}
+      <div className="text-[10px] text-ink-500">{elo}</div>
     </div>
   )
 }
