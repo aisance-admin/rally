@@ -2,6 +2,7 @@ import { supabase } from './supabase'
 import type { AppData, Division, LeagueEvent, Match, Player } from '../types'
 import { applyElo } from './elo'
 import { buildMockData, divisionForElo } from './mockData'
+import { parseSeriesName } from './seasons'
 
 // ---------- row mappers ----------
 type Row = Record<string, any>
@@ -43,16 +44,20 @@ const toMatch = (r: Row): Match => ({
   playedAt: r.played_at,
 })
 
-const toEvent = (r: Row): LeagueEvent => ({
-  id: r.id,
-  name: r.name,
-  date: r.date,
-  tables: r.tables,
-  durationMin: r.duration_min,
-  season: r.duration_min ?? 1,
-  participantIds: (r.rally_event_participants ?? []).map((p: Row) => p.player_id),
-  status: r.status,
-})
+const toEvent = (r: Row): LeagueEvent => {
+  const { name, seriesId } = parseSeriesName(r.name)
+  return {
+    id: r.id,
+    seriesId,
+    name,
+    date: r.date,
+    tables: r.tables,
+    durationMin: r.duration_min,
+    season: r.duration_min ?? 1,
+    participantIds: (r.rally_event_participants ?? []).map((p: Row) => p.player_id),
+    status: r.status,
+  }
+}
 
 // ---------- reads ----------
 export async function fetchAll(): Promise<AppData> {

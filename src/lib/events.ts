@@ -1,5 +1,6 @@
 import { supabase } from './supabase'
 import { manualSizes } from './planner'
+import { parseSeriesName } from './seasons'
 import type { EventDetail, LeagueWithPlayers, Match, Player } from '../types'
 
 const DIV_PRESET = [
@@ -183,10 +184,12 @@ export async function fetchEventDetail(eventId: string): Promise<EventDetail> {
   }))
 
   const e = evRes.data
+  const parsed = parseSeriesName(e.name)
   return {
     event: {
       id: e.id,
-      name: e.name,
+      seriesId: parsed.seriesId,
+      name: parsed.name,
       date: e.date,
       tables: e.tables,
       durationMin: e.duration_min,

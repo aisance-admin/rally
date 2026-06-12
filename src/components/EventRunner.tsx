@@ -19,6 +19,7 @@ import {
 } from '../lib/seasons'
 
 interface FirstCfg {
+  seriesId: string
   name: string
   players: Player[]
   divisions: number
@@ -49,7 +50,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
       if (openReq.current !== req) return
       setDetail(d)
       if (d.event.season > 1) {
-        const prev = store.events.find((e) => e.name === d.event.name && e.season === d.event.season - 1)
+        const prev = store.events.find((e) => e.seriesId === d.event.seriesId && e.season === d.event.season - 1)
         const pr = prev ? seasonRecordsFor(await fetchEventDetail(prev.id)) : null
         if (openReq.current === req) setPrevRecords(pr)
       }
@@ -85,6 +86,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
     return (
       <DivisionDraft
         store={store}
+        seriesId={firstCfg.seriesId}
         seriesName={firstCfg.name}
         season={1}
         initialDivisions={firstDivisions}
@@ -108,6 +110,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
     return (
       <DivisionDraft
         store={store}
+        seriesId={draftPrev.event.seriesId}
         seriesName={draftPrev.event.name}
         season={draftPrev.event.season + 1}
         initialDivisions={nextDivisions}
@@ -249,7 +252,7 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
 
   function go() {
     if (count < 2) return
-    onConfigured({ name: name.trim() || 'League Night', players: store.players.filter((p) => isIn(p.id)), divisions }, method)
+    onConfigured({ seriesId: crypto.randomUUID(), name: name.trim() || 'League Night', players: store.players.filter((p) => isIn(p.id)), divisions }, method)
   }
 
   if (store.players.length === 0)

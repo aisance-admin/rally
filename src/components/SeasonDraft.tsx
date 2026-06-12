@@ -15,6 +15,7 @@ const clone = (divs: DraftDivision[]) => divs.map((d) => ({ ...d, players: [...d
 
 export function DivisionDraft({
   store,
+  seriesId,
   seriesName,
   season,
   initialDivisions,
@@ -27,6 +28,7 @@ export function DivisionDraft({
   onCancel,
 }: {
   store: Store
+  seriesId: string
   seriesName: string
   season: number
   initialDivisions: DraftDivision[]
@@ -93,7 +95,7 @@ export function DivisionDraft({
     if (!valid) return
     setBusy(true)
     try {
-      const id = await createSeasonFromDivisions(seriesName, season, nonEmpty)
+      const id = await createSeasonFromDivisions(seriesId, seriesName, season, nonEmpty)
       await store.refresh()
       onStarted(id)
     } finally {

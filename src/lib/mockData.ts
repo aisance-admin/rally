@@ -137,6 +137,7 @@ export function buildMockData(): AppData {
   const events: LeagueEvent[] = [
     {
       id: 'e1',
+      seriesId: 'e1',
       name: 'Thursday Night League',
       date: isoDaysAgo(-1, 0),
       tables: 15,
@@ -147,6 +148,7 @@ export function buildMockData(): AppData {
     },
     {
       id: 'e2',
+      seriesId: 'e2',
       name: 'Last Week · Open Night',
       date: isoDaysAgo(6),
       tables: 12,

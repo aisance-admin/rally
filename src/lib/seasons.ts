@@ -48,20 +48,39 @@ export interface DraftDivision {
 }
 
 export interface Series {
+  seriesId: string
   name: string
   seasons: LeagueEvent[] // sorted by season ascending
 }
 
-/** Group events into series by name; seasons sorted ascending. */
+// Each league gets its own series id so two leagues stay separate even if they
+// share a display name. We pack it into the event `name` (no schema change):
+// "<display name>␟<seriesId>". Legacy rows with no marker group by their name.
+const SERIES_DELIM = '␟'
+
+export function encodeSeriesName(displayName: string, seriesId: string): string {
+  return `${displayName}${SERIES_DELIM}${seriesId}`
+}
+
+export function parseSeriesName(raw: string): { name: string; seriesId: string } {
+  const i = raw.indexOf(SERIES_DELIM)
+  if (i < 0) return { name: raw, seriesId: raw }
+  return { name: raw.slice(0, i), seriesId: raw.slice(i + 1) }
+}
+
+/** Group events into leagues by series id; one card per league, seasons ascending. */
 export function groupSeries(events: LeagueEvent[]): Series[] {
   const map = new Map<string, LeagueEvent[]>()
   for (const e of events) {
-    const arr = map.get(e.name) ?? []
+    const arr = map.get(e.seriesId) ?? []
     arr.push(e)
-    map.set(e.name, arr)
+    map.set(e.seriesId, arr)
   }
-  return [...map.entries()]
-    .map(([name, seasons]) => ({ name, seasons: seasons.sort((a, b) => a.season - b.season) }))
+  return [...map.values()]
+    .map((seasons) => {
+      const sorted = seasons.sort((a, b) => a.season - b.season)
+      return { seriesId: sorted[0].seriesId, name: sorted[0].name, seasons: sorted }
+    })
     .sort((a, b) => {
       const la = a.seasons[a.seasons.length - 1]
       const lb = b.seasons[b.seasons.length - 1]
@@ -208,6 +227,7 @@ export function computeNextSeasonDivisions(prev: EventDetail): DraftDivision[] {
 
 /** Persist a new season from an explicit (admin-adjusted) division layout. */
 export async function createSeasonFromDivisions(
+  seriesId: string,
   seriesName: string,
   season: number,
   divisions: DraftDivision[],
@@ -215,7 +235,7 @@ export async function createSeasonFromDivisions(
   const { data: ev, error } = await supabase
     .from('rally_events')
     .insert({
-      name: seriesName,
+      name: encodeSeriesName(seriesName, seriesId),
       duration_min: season,
       tables: divisions.length,
       set_minutes: 0,
