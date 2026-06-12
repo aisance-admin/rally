@@ -28,12 +28,12 @@ export function MatchesFeed({
         <button
           onClick={onRecord}
           disabled={players.length < 2}
-          className="rounded-lg bg-brand px-3 py-2 text-sm font-bold text-ink-900 transition hover:bg-brand-400 disabled:cursor-not-allowed disabled:opacity-40"
+          className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-sm font-bold text-white glow-brand disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
         >
           + Record match
         </button>
       </div>
-      <div className="space-y-2">
+      <div className="stagger space-y-2">
         {matches.map((m) => {
           const w = pById[m.winnerId]
           const loserId = m.playerAId === m.winnerId ? m.playerBId : m.playerAId
@@ -45,7 +45,7 @@ export function MatchesFeed({
           return (
             <div
               key={m.id}
-              className="flex items-center gap-3 rounded-xl bg-ink-850 px-3 py-2.5 ring-1 ring-ink-800 md:px-4"
+              className="glass lift flex items-center gap-3 rounded-2xl px-3 py-2.5 sm:px-4"
             >
               <div className="hidden w-24 shrink-0 flex-col gap-0.5 md:flex">
                 {d && (
@@ -91,7 +91,7 @@ export function MatchesFeed({
           )
         })}
         {matches.length === 0 && (
-          <div className="rounded-xl border border-dashed border-ink-700 py-16 text-center text-sm text-ink-500">
+          <div className="glass rounded-3xl py-16 text-center text-sm text-ink-500">
             No matches recorded yet.
           </div>
         )}

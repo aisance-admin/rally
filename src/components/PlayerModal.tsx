@@ -43,7 +43,7 @@ export function PlayerModal({
       >
         <button
           onClick={onClose}
-          className="absolute right-4 top-4 grid h-8 w-8 place-items-center rounded-lg bg-ink-800 text-ink-500 hover:text-white"
+          className="absolute right-4 top-4 grid h-8 w-8 place-items-center rounded-lg bg-white/10 text-ink-300 hover:text-white"
         >
           ✕
         </button>
@@ -66,11 +66,11 @@ export function PlayerModal({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-px bg-ink-800 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-px bg-white/8 sm:grid-cols-4">
         <Stat label="Global rank" value={`#${rank}`} />
-        <Stat label="ELO" value={String(player.elo)} sub={`peak ${player.peakElo}`} />
+        <Stat label="Rating" value={String(player.elo)} />
         <Stat label="Win rate" value={`${winRate(player.wins, player.losses)}%`} sub={`${player.wins}W ${player.losses}L`} />
-        <Stat label="Division" value={div?.name ?? '—'} color={div?.color} />
+        <Stat label="Peak" value={String(player.peakElo)} color={skill.color} />
       </div>
 
       <div className="px-5 py-4">
@@ -80,7 +80,7 @@ export function PlayerModal({
           </span>
           <span className="text-xs text-ink-500">last {Math.min(player.history.length, 20)} updates</span>
         </div>
-        <div className="rounded-xl bg-ink-850 p-3 ring-1 ring-ink-800">
+        <div className="rounded-xl bg-white/[0.05] p-3 ring-1 ring-white/10">
           <Sparkline data={player.history.slice(-20)} color={div?.color ?? '#ff5500'} width={520} height={90} />
         </div>
       </div>
@@ -101,13 +101,13 @@ export function PlayerModal({
               <button
                 key={m.id}
                 onClick={() => opp && onSelect(opp.id)}
-                className="flex w-full items-center gap-3 rounded-lg bg-ink-850 px-3 py-2 text-left ring-1 ring-ink-800 hover:bg-ink-800"
+                className="tap flex w-full items-center gap-3 rounded-xl bg-white/[0.05] px-3 py-2 text-left ring-1 ring-white/10 hover:bg-white/10"
               >
                 <span
                   className="grid h-6 w-6 place-items-center rounded text-xs font-bold"
                   style={{
-                    background: won ? '#32d74b22' : '#ff453a22',
-                    color: won ? '#32d74b' : '#ff453a',
+                    background: won ? '#34d39922' : '#fb6f7d22',
+                    color: won ? '#34d399' : '#fb6f7d',
                   }}
                 >
                   {won ? 'W' : 'L'}
@@ -119,7 +119,7 @@ export function PlayerModal({
                 </span>
                 <span
                   className="w-10 text-right font-mono text-xs font-semibold"
-                  style={{ color: won ? '#32d74b' : '#ff453a' }}
+                  style={{ color: won ? '#34d399' : '#fb6f7d' }}
                 >
                   {delta > 0 ? '+' : ''}
                   {delta}
@@ -151,7 +151,7 @@ function Stat({
   color?: string
 }) {
   return (
-    <div className="bg-ink-850 px-4 py-3">
+    <div className="bg-white/[0.05] px-4 py-3">
       <div className="text-[11px] uppercase tracking-wide text-ink-500">{label}</div>
       <div className="text-lg font-extrabold" style={{ color: color ?? '#fff' }}>
         {value}

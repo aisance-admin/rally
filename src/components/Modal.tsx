@@ -21,15 +21,16 @@ export function Modal({
 
   return (
     <div
-      className="fixed inset-0 z-50 grid place-items-end overflow-y-auto bg-black/60 backdrop-blur-sm sm:place-items-center sm:p-4"
+      className="animate-fade fixed inset-0 z-50 grid place-items-end overflow-y-auto bg-black/55 p-0 backdrop-blur-md sm:place-items-center sm:p-4"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className={`animate-pop w-full overflow-hidden rounded-t-2xl bg-ink-850 ring-1 ring-ink-600 sm:rounded-2xl ${
+        className={`animate-pop glass w-full overflow-hidden rounded-t-3xl sm:rounded-3xl ${
           wide ? 'sm:max-w-xl' : 'sm:max-w-md'
         }`}
       >
+        <div className="mx-auto mb-1 mt-2 h-1 w-10 rounded-full bg-white/15 sm:hidden" />
         {children}
       </div>
     </div>

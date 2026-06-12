@@ -1,8 +1,45 @@
 import { supabase } from './supabase'
+import { manualSizes } from './planner'
 import type { EventDetail, LeagueEvent, LeagueWithPlayers, Match, Player } from '../types'
 
 export const LEAGUE_NAMES = ['Elite', 'Division 1', 'Division 2', 'Division 3', 'Division 4', 'Division 5', 'Division 6', 'Division 7']
-export const LEAGUE_COLORS = ['#ff2d55', '#ff6321', '#f0a93b', '#5ec26a', '#9aa4b2', '#6ea8ff', '#b06eff', '#46d6c4']
+export const LEAGUE_COLORS = ['#ff5a3c', '#ff8a3d', '#ffc24b', '#5ed6a0', '#5aa9ff', '#a78bff', '#ff6ab0', '#46d6c4']
+
+/** Max leagues so every league has ≥2 players and there are fewer leagues than players. */
+export function maxLeaguesFor(activePlayers: number): number {
+  return Math.max(1, Math.floor(activePlayers / 2))
+}
+
+/** First-season layout: split checked-in players into `numLeagues` divisions,
+ *  either by rating (strongest in Elite) or randomly. Admin can edit afterwards. */
+export function buildInitialDivisions(
+  players: Player[],
+  numLeagues: number,
+  mode: 'elo' | 'random',
+): DraftDivision[] {
+  let ordered: Player[]
+  if (mode === 'elo') {
+    ordered = [...players].sort((a, b) => b.elo - a.elo)
+  } else {
+    ordered = [...players]
+    for (let i = ordered.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[ordered[i], ordered[j]] = [ordered[j], ordered[i]]
+    }
+  }
+  const sizes = manualSizes(ordered.length, numLeagues)
+  const divs: DraftDivision[] = []
+  let idx = 0
+  sizes.forEach((sz, i) => {
+    divs.push({
+      name: LEAGUE_NAMES[i] ?? `League ${i + 1}`,
+      color: LEAGUE_COLORS[i] ?? '#9aa4b2',
+      players: ordered.slice(idx, idx + sz),
+    })
+    idx += sz
+  })
+  return divs
+}
 
 export interface DraftDivision {
   name: string
