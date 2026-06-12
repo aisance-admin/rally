@@ -190,17 +190,14 @@ function SeasonHub({ store, onOpen, onNewSeries, onStartNext }: { store: Store; 
       <div className="stagger space-y-4">
         {series.map((s) => {
           const latest = s.seasons[s.seasons.length - 1]
-          const canStartNext = latest.status === 'done'
           return (
-            <div key={s.name} className="glass overflow-hidden rounded-3xl">
+            <div key={s.seriesId} className="glass overflow-hidden rounded-3xl">
               <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-4">
                 <div>
                   <div className="text-base font-extrabold">{s.name}</div>
                   <div className="text-xs text-ink-500">{s.seasons.length} season{s.seasons.length === 1 ? '' : 's'}</div>
                 </div>
-                {canStartNext && (
-                  <button onClick={() => onStartNext(latest.id)} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-xs font-bold text-white glow-brand">⚡ Start Season {latest.season + 1}</button>
-                )}
+                <button onClick={() => onStartNext(latest.id)} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-xs font-bold text-white glow-brand">⚡ Start Season {latest.season + 1}</button>
               </div>
               <div className="divide-hair border-t hairline">
                 {[...s.seasons].reverse().map((ev) => (
@@ -357,7 +354,7 @@ function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecord
     <div className="space-y-4">
       <div className="glass flex flex-wrap items-center justify-between gap-3 rounded-3xl p-4">
         <div className="flex min-w-0 items-center gap-3">
-          <button onClick={onBack} className="glass-soft tap grid h-9 w-9 shrink-0 place-items-center rounded-xl text-ink-300 hover:text-white" title="Back to leagues">←</button>
+          <button onClick={onBack} className="glass-soft tap flex shrink-0 items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white" title="Back to all leagues">← Leagues</button>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               {readOnly ? <span className="h-2 w-2 rounded-full bg-ink-500" /> : <span className="h-2 w-2 rounded-full bg-win pulse-dot" />}
