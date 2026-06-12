@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import type { EventDetail, LeagueWithPlayers, Match, Player } from '../types'
 import type { Store } from '../lib/store'
 import { manualSizes, roundRobin } from '../lib/planner'
@@ -21,66 +21,64 @@ import {
 interface FirstCfg {
   name: string
   players: Player[]
-  leagues: number
+  divisions: number
 }
 
 export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: string) => void }) {
-  const liveEvent = store.events.find((e) => e.status === 'live')
+  const [view, setView] = useState<'hub' | 'season' | 'setup' | 'draft'>('hub')
+  const [openId, setOpenId] = useState<string | null>(null)
   const [detail, setDetail] = useState<EventDetail | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [prevRecords, setPrevRecords] = useState<Map<string, WL> | null>(null)
 
-  const [view, setView] = useState<'hub' | 'setup' | 'draft'>('hub')
   const [firstCfg, setFirstCfg] = useState<FirstCfg | null>(null)
   const [firstMethod, setFirstMethod] = useState<'elo' | 'random'>('elo')
   const [reseed, setReseed] = useState(0)
   const [draftPrev, setDraftPrev] = useState<EventDetail | null>(null)
-  const [promoteN, setPromoteN] = useState(2)
 
-  const refreshDetail = async (id: string) => {
+  const openReq = useRef(0)
+  const openSeason = async (id: string) => {
+    const req = ++openReq.current
+    setOpenId(id)
+    setView('season')
+    setDetail(null)
+    setPrevRecords(null)
     setLoadingDetail(true)
     try {
-      setDetail(await fetchEventDetail(id))
+      const d = await fetchEventDetail(id)
+      if (openReq.current !== req) return
+      setDetail(d)
+      if (d.event.season > 1) {
+        const prev = store.events.find((e) => e.name === d.event.name && e.season === d.event.season - 1)
+        const pr = prev ? seasonRecordsFor(await fetchEventDetail(prev.id)) : null
+        if (openReq.current === req) setPrevRecords(pr)
+      }
     } finally {
-      setLoadingDetail(false)
+      if (openReq.current === req) setLoadingDetail(false)
     }
   }
-
-  useEffect(() => {
-    if (liveEvent) refreshDetail(liveEvent.id)
-    else setDetail(null)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveEvent?.id])
-
-  // Previous-season records for the live "last: W-L" line.
-  useEffect(() => {
-    let cancelled = false
-    async function loadPrev() {
-      if (!detail || detail.event.season <= 1) return setPrevRecords(null)
-      const prev = store.events.find((e) => e.name === detail.event.name && e.season === detail.event.season - 1)
-      if (!prev) return setPrevRecords(null)
-      const pd = await fetchEventDetail(prev.id)
-      if (!cancelled) setPrevRecords(seasonRecordsFor(pd))
-    }
-    loadPrev()
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail?.event.id])
+  const backToHub = () => { setView('hub'); setOpenId(null); setDetail(null); setFirstCfg(null); setDraftPrev(null) }
+  const startNext = async (prevId: string) => { setDraftPrev(await fetchEventDetail(prevId)); setView('draft') }
 
   const firstDivisions = useMemo(
-    () => (firstCfg ? buildInitialDivisions(firstCfg.players, firstCfg.leagues, firstMethod) : []),
+    () => (firstCfg ? buildInitialDivisions(firstCfg.players, firstCfg.divisions, firstMethod) : []),
     [firstCfg, firstMethod, reseed],
   )
-  const nextDivisions = useMemo(
-    () => (draftPrev ? computeNextSeasonDivisions(draftPrev, promoteN) : []),
-    [draftPrev, promoteN],
-  )
+  const nextDivisions = useMemo(() => (draftPrev ? computeNextSeasonDivisions(draftPrev) : []), [draftPrev])
   const nextRecords = useMemo(() => (draftPrev ? seasonRecordsFor(draftPrev) : null), [draftPrev])
 
-  const backToHub = () => { setView('hub'); setFirstCfg(null); setDraftPrev(null) }
+  const series = useMemo(() => groupSeries(store.events), [store.events])
+  const openSeries = openId ? series.find((s) => s.seasons.some((x) => x.id === openId)) : null
+  const isLatestDone = !!(openSeries && detail && openSeries.seasons[openSeries.seasons.length - 1].id === openId && detail.event.status === 'done')
 
-  if (liveEvent && detail) {
-    return <LiveEvent store={store} detail={detail} loading={loadingDetail} prevRecords={prevRecords} onSelect={onSelect} onChanged={() => refreshDetail(liveEvent.id)} />
+  if (view === 'setup') {
+    return (
+      <Setup
+        store={store}
+        onConfigured={(cfg, method) => { setFirstCfg(cfg); setFirstMethod(method); setView('draft') }}
+        onCancel={backToHub}
+      />
+    )
   }
 
   if (view === 'draft' && firstCfg) {
@@ -91,7 +89,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
         season={1}
         initialDivisions={firstDivisions}
         subtitle={firstMethod === 'random' ? 'First season · random split' : 'First season · seeded by rating'}
-        note={<>Players are split {firstMethod === 'random' ? 'randomly' : 'by rating (strongest in Elite)'}. Move anyone with ▲▼, sit them out with ✕, or add benched players below.</>}
+        note={<>Players are split {firstMethod === 'random' ? 'randomly' : 'by rating'}. Move anyone with ▲▼, sit them out with ✕, or add benched players below.</>}
         controls={
           <div className="flex items-center gap-1.5">
             <Seg value={firstMethod} onChange={setFirstMethod} options={[['elo', 'By rating'], ['random', 'Random']]} />
@@ -100,7 +98,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
             )}
           </div>
         }
-        onStarted={(id) => { backToHub(); refreshDetail(id) }}
+        onStarted={(id) => { setFirstCfg(null); openSeason(id) }}
         onCancel={backToHub}
       />
     )
@@ -115,38 +113,48 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
         initialDivisions={nextDivisions}
         prevRecords={nextRecords}
         prevSeasonNo={draftPrev.event.season}
-        subtitle={`Promotion / relegation from Season ${draftPrev.event.season}`}
-        note={<>Default: top {promoteN} of each league move up, bottom {promoteN} move down — by last season's standings. Adjust the count, or move players by hand.</>}
-        controls={<UpDown value={promoteN} onChange={setPromoteN} />}
-        onStarted={(id) => { backToHub(); refreshDetail(id) }}
+        subtitle={`Re-seeded by Season ${draftPrev.event.season} wins`}
+        note={<>Everyone is re-ranked by last season's <span className="text-win">wins</span> (then game difference) — Division 1 holds the players with the most wins. Move anyone by hand with ▲▼.</>}
+        onStarted={(id) => { setDraftPrev(null); openSeason(id) }}
         onCancel={backToHub}
       />
     )
   }
 
-  if (view === 'setup') {
+  if (view === 'season' && !detail) {
     return (
-      <Setup
+      <div className="glass grid place-items-center rounded-3xl py-20 text-center">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-ink-600 border-t-brand" />
+        <span className="mt-3 text-sm text-ink-500">Loading season…</span>
+      </div>
+    )
+  }
+
+  if (view === 'season' && detail) {
+    return (
+      <SeasonView
         store={store}
-        onConfigured={(cfg, method) => { setFirstCfg(cfg); setFirstMethod(method); setView('draft') }}
-        onCancel={store.events.length ? backToHub : undefined}
+        detail={detail}
+        loading={loadingDetail}
+        readOnly={detail.event.status === 'done'}
+        canStartNext={isLatestDone}
+        prevRecords={prevRecords}
+        onSelect={onSelect}
+        onChanged={() => openId && openSeason(openId)}
+        onBack={backToHub}
+        onStartNext={() => startNext(detail.event.id)}
       />
     )
   }
 
-  return (
-    <SeasonHub
-      store={store}
-      onNewSeries={() => setView('setup')}
-      onStartNext={async (prevId) => { setDraftPrev(await fetchEventDetail(prevId)); setView('draft') }}
-    />
-  )
+  return <SeasonHub store={store} onOpen={openSeason} onNewSeries={() => setView('setup')} onStartNext={startNext} />
 }
 
-// ───────────────────────── season hub ─────────────────────────
+// ───────────────────────── hub ─────────────────────────
 
-function SeasonHub({ store, onNewSeries, onStartNext }: { store: Store; onNewSeries: () => void; onStartNext: (id: string) => void }) {
-  const series = groupSeries(store.events)
+function SeasonHub({ store, onOpen, onNewSeries, onStartNext }: { store: Store; onOpen: (id: string) => void; onNewSeries: () => void; onStartNext: (id: string) => void }) {
+  const series = useMemo(() => groupSeries(store.events), [store.events])
+  const live = store.events.find((e) => e.status === 'live')
 
   if (store.players.length === 0)
     return <Empty icon="📋" title="No roster yet" body={<>Add players in the <span className="font-semibold text-brand">Roster</span> tab (or load the sample roster) first.</>} />
@@ -156,7 +164,7 @@ function SeasonHub({ store, onNewSeries, onStartNext }: { store: Store; onNewSer
       <div className="glass grid place-items-center rounded-3xl py-16 text-center">
         <div className="text-5xl">🏆</div>
         <div className="mt-3 text-lg font-semibold">No leagues yet</div>
-        <div className="mt-1 max-w-sm text-sm text-ink-500">Start a league and play seasons. Each new season re-seeds players from the previous results.</div>
+        <div className="mt-1 max-w-sm text-sm text-ink-500">Start a league and play seasons. Each new season re-seeds players by last season's wins.</div>
         <button onClick={onNewSeries} className="tap mt-5 rounded-2xl bg-gradient-to-br from-brand to-brand2 px-5 py-3 text-sm font-bold text-white glow-brand">＋ Start a league</button>
       </div>
     )
@@ -167,6 +175,14 @@ function SeasonHub({ store, onNewSeries, onStartNext }: { store: Store; onNewSer
         <h2 className="text-sm font-bold uppercase tracking-wider text-ink-500">Leagues &amp; seasons</h2>
         <button onClick={onNewSeries} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white">＋ New league</button>
       </div>
+
+      {live && (
+        <button onClick={() => onOpen(live.id)} className="glass tap lift flex w-full items-center gap-3 rounded-2xl px-4 py-3" style={{ background: 'linear-gradient(90deg, rgba(52,211,153,0.16), rgba(255,255,255,0.04))' }}>
+          <span className="h-2 w-2 rounded-full bg-win pulse-dot" />
+          <span className="flex-1 text-left text-sm font-bold">Resume {live.name} · Season {live.season}</span>
+          <span className="text-xs font-semibold text-win">Open →</span>
+        </button>
+      )}
 
       <div className="stagger space-y-4">
         {series.map((s) => {
@@ -185,12 +201,13 @@ function SeasonHub({ store, onNewSeries, onStartNext }: { store: Store; onNewSer
               </div>
               <div className="divide-hair border-t hairline">
                 {[...s.seasons].reverse().map((ev) => (
-                  <div key={ev.id} className="flex w-full items-center gap-3 px-5 py-2.5 text-left">
+                  <button key={ev.id} onClick={() => onOpen(ev.id)} className="tap flex w-full items-center gap-3 px-5 py-3 text-left hover:bg-white/5">
                     <span className="grid h-7 w-7 place-items-center rounded-xl bg-white/8 font-mono text-xs font-bold text-ink-300">S{ev.season}</span>
                     <span className="flex-1 text-sm font-semibold">Season {ev.season}</span>
-                    <span className="text-xs text-ink-500">{ev.participantIds.length} players · {ev.tables} leagues</span>
+                    <span className="text-xs text-ink-500">{ev.participantIds.length} players · {ev.tables} divisions</span>
                     <StatusPill status={ev.status} />
-                  </div>
+                    <span className="text-ink-600">›</span>
+                  </button>
                 ))}
               </div>
             </div>
@@ -203,7 +220,7 @@ function SeasonHub({ store, onNewSeries, onStartNext }: { store: Store; onNewSer
 
 function StatusPill({ status }: { status: string }) {
   const map: Record<string, { c: string; t: string }> = {
-    done: { c: '#9aa4b2', t: 'Done' },
+    done: { c: '#9aa4b2', t: 'Final' },
     live: { c: '#34d399', t: 'Live' },
     draft: { c: '#5aa9ff', t: 'Draft' },
   }
@@ -217,25 +234,22 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
   const [name, setName] = useState('League Night')
   const [method, setMethod] = useState<'elo' | 'random'>('elo')
   const [unchecked, setUnchecked] = useState<Set<string>>(() => new Set())
-  const [numLeagues, setNumLeagues] = useState(4)
+  const [numDiv, setNumDiv] = useState(4)
 
   const roster = useMemo(() => [...store.players].sort((a, b) => b.elo - a.elo), [store.players])
   const isIn = (id: string) => !unchecked.has(id)
   const count = roster.filter((p) => isIn(p.id)).length
 
-  const maxLeagues = maxLeaguesFor(count)
-  const leagues = Math.min(Math.max(1, numLeagues), maxLeagues)
-  const sizes = manualSizes(count, leagues)
-  const perLeague = leagues > 0 ? Math.round(count / leagues) : 0
-  const setPerLeague = (per: number) => {
-    if (per > 0 && count > 0) setNumLeagues(Math.max(1, Math.min(maxLeagues, Math.round(count / per))))
-  }
-  const toggle = (id: string) =>
-    setUnchecked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const maxDiv = maxLeaguesFor(count)
+  const divisions = Math.min(Math.max(1, numDiv), maxDiv)
+  const sizes = manualSizes(count, divisions)
+  const perDiv = divisions > 0 ? Math.round(count / divisions) : 0
+  const setPerDiv = (per: number) => { if (per > 0 && count > 0) setNumDiv(Math.max(1, Math.min(maxDiv, Math.round(count / per)))) }
+  const toggle = (id: string) => setUnchecked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
 
   function go() {
     if (count < 2) return
-    onConfigured({ name: name.trim() || 'League Night', players: store.players.filter((p) => isIn(p.id)), leagues }, method)
+    onConfigured({ name: name.trim() || 'League Night', players: store.players.filter((p) => isIn(p.id)), divisions }, method)
   }
 
   if (store.players.length === 0)
@@ -253,19 +267,19 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
           <div>
             <div className="mb-1.5 text-[11px] uppercase tracking-wide text-ink-500">First-season split</div>
             <div className="grid grid-cols-2 gap-2">
-              <MethodCard active={method === 'elo'} onClick={() => setMethod('elo')} title="By rating" desc="Strongest players seed the top leagues." icon="📊" />
-              <MethodCard active={method === 'random'} onClick={() => setMethod('random')} title="Random" desc="Shuffle players across leagues." icon="🎲" />
+              <MethodCard active={method === 'elo'} onClick={() => setMethod('elo')} title="By rating" desc="Strongest players seed the top divisions." icon="📊" />
+              <MethodCard active={method === 'random'} onClick={() => setMethod('random')} title="Random" desc="Shuffle players across divisions." icon="🎲" />
             </div>
           </div>
         </div>
 
         <div className="glass space-y-3 rounded-3xl p-5">
-          <h2 className="text-sm font-bold uppercase tracking-wider text-ink-500">League structure</h2>
+          <h2 className="text-sm font-bold uppercase tracking-wider text-ink-500">Divisions</h2>
           <div className="grid grid-cols-2 gap-3">
-            <NumControl label="Leagues" value={leagues} min={1} max={maxLeagues} onChange={setNumLeagues} />
-            <NumControl label="Players / league" value={perLeague} min={2} max={Math.max(2, count)} onChange={setPerLeague} />
+            <NumControl label="Divisions" value={divisions} min={1} max={maxDiv} onChange={setNumDiv} />
+            <NumControl label="Players / division" value={perDiv} min={2} max={Math.max(2, count)} onChange={setPerDiv} />
           </div>
-          <p className="text-[11px] text-ink-500">{count} playing → sizes <span className="font-mono text-ink-300">{sizes.join(' · ') || '—'}</span> <span className="text-ink-600">(max {maxLeagues} leagues)</span></p>
+          <p className="text-[11px] text-ink-500">{count} playing → sizes <span className="font-mono text-ink-300">{sizes.join(' · ') || '—'}</span> <span className="text-ink-600">(max {maxDiv})</span></p>
         </div>
 
         <div className="glass overflow-hidden rounded-3xl">
@@ -295,41 +309,41 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
       <div className="space-y-4">
         <div className="grid grid-cols-3 gap-3">
           <Kpi label="Playing" value={String(count)} />
-          <Kpi label="Leagues" value={String(leagues)} />
-          <Kpi label="Per league" value={String(perLeague)} />
+          <Kpi label="Divisions" value={String(divisions)} />
+          <Kpi label="Per division" value={String(perDiv)} />
         </div>
 
         <div className="glass overflow-hidden rounded-3xl">
           <div className="grid grid-cols-[1fr_90px] gap-2 px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-ink-500">
-            <span>League</span><span className="text-right">Players</span>
+            <span>Division</span><span className="text-right">Players</span>
           </div>
           <div className="divide-hair">
             {sizes.map((sz, i) => (
               <div key={i} className="grid grid-cols-[1fr_90px] items-center gap-2 px-5 py-2.5 text-sm">
                 <span className="flex items-center gap-2 font-semibold">
                   <span className="h-2 w-2 rounded-full" style={{ background: LEAGUE_COLORS[i] ?? '#9aa4b2', boxShadow: `0 0 10px ${LEAGUE_COLORS[i] ?? '#9aa4b2'}` }} />
-                  {LEAGUE_NAMES[i] ?? `League ${i + 1}`}
+                  {LEAGUE_NAMES[i] ?? `Division ${i + 1}`}
                 </span>
                 <span className="text-right font-mono">{sz}</span>
               </div>
             ))}
-            {sizes.length === 0 && <div className="px-5 py-6 text-center text-sm text-ink-500">Check in players to preview leagues.</div>}
+            {sizes.length === 0 && <div className="px-5 py-6 text-center text-sm text-ink-500">Check in players to preview divisions.</div>}
           </div>
         </div>
 
         <button onClick={go} disabled={count < 2} className="tap w-full rounded-2xl bg-gradient-to-br from-brand to-brand2 py-3.5 text-base font-extrabold text-white glow-brand disabled:opacity-40 disabled:shadow-none">
-          {count < 2 ? 'Add at least 2 players' : `Build ${leagues} leagues →`}
+          {count < 2 ? 'Add at least 2 players' : `Build ${divisions} divisions →`}
         </button>
-        <p className="text-center text-[11px] text-ink-500">You can drag players between leagues on the next screen.</p>
+        <p className="text-center text-[11px] text-ink-500">You can drag players between divisions on the next screen.</p>
       </div>
     </div>
   )
 }
 
-// ───────────────────────── live event ─────────────────────────
+// ───────────────────────── season view (live or final) ─────────────────────────
 
-function LiveEvent({ store, detail, loading, prevRecords, onSelect, onChanged }: {
-  store: Store; detail: EventDetail; loading: boolean; prevRecords?: Map<string, WL> | null; onSelect: (id: string) => void; onChanged: () => void
+function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecords, onSelect, onChanged, onBack, onStartNext }: {
+  store: Store; detail: EventDetail; loading: boolean; readOnly: boolean; canStartNext: boolean; prevRecords?: Map<string, WL> | null; onSelect: (id: string) => void; onChanged: () => void; onBack: () => void; onStartNext: () => void
 }) {
   const [confirmFinish, setConfirmFinish] = useState(false)
   const totalFx = detail.leagues.reduce((s, l) => s + fixtures(l).length, 0)
@@ -339,28 +353,37 @@ function LiveEvent({ store, detail, loading, prevRecords, onSelect, onChanged }:
   return (
     <div className="space-y-4">
       <div className="glass flex flex-wrap items-center justify-between gap-3 rounded-3xl p-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-win pulse-dot" />
-            <span className="truncate text-lg font-extrabold">{detail.event.name}</span>
-            <span className="rounded-lg bg-white/8 px-2 py-0.5 text-[11px] font-bold uppercase text-ink-300">Season {detail.event.season}</span>
-            <span className="rounded-lg bg-win/15 px-2 py-0.5 text-[11px] font-bold uppercase text-win">Live</span>
-          </div>
-          <div className="mt-1.5 flex items-center gap-2 text-xs text-ink-500">
-            <span>{detail.event.participantIds.length} players · {detail.leagues.length} leagues</span>
-            <span className="h-1 w-24 overflow-hidden rounded-full bg-white/10"><span className="block h-full rounded-full bg-win transition-all" style={{ width: `${pct}%` }} /></span>
-            <span>{playedFx}/{totalFx}</span>
+        <div className="flex min-w-0 items-center gap-3">
+          <button onClick={onBack} className="glass-soft tap grid h-9 w-9 shrink-0 place-items-center rounded-xl text-ink-300 hover:text-white" title="Back to leagues">←</button>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              {readOnly ? <span className="h-2 w-2 rounded-full bg-ink-500" /> : <span className="h-2 w-2 rounded-full bg-win pulse-dot" />}
+              <span className="truncate text-lg font-extrabold">{detail.event.name}</span>
+              <span className="rounded-lg bg-white/8 px-2 py-0.5 text-[11px] font-bold uppercase text-ink-300">Season {detail.event.season}</span>
+              <StatusPill status={detail.event.status} />
+            </div>
+            <div className="mt-1.5 flex items-center gap-2 text-xs text-ink-500">
+              <span>{detail.event.participantIds.length} players · {detail.leagues.length} divisions</span>
+              <span className="h-1 w-20 overflow-hidden rounded-full bg-white/10"><span className="block h-full rounded-full" style={{ width: `${pct}%`, background: readOnly ? '#9aa4b2' : '#34d399' }} /></span>
+              <span>{playedFx}/{totalFx}</span>
+            </div>
           </div>
         </div>
         <div className="flex gap-2">
-          <button onClick={async () => { await deleteEvent(detail.event.id); await store.refresh() }} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-500 hover:text-loss">Discard</button>
-          <button onClick={() => setConfirmFinish(true)} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-xs font-bold text-white glow-brand">✓ Finish</button>
+          {readOnly ? (
+            canStartNext && <button onClick={onStartNext} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-xs font-bold text-white glow-brand">⚡ Start Season {detail.event.season + 1}</button>
+          ) : (
+            <>
+              <button onClick={async () => { await deleteEvent(detail.event.id); await store.refresh(); onBack() }} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-500 hover:text-loss">Discard</button>
+              <button onClick={() => setConfirmFinish(true)} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-xs font-bold text-white glow-brand">✓ Finish</button>
+            </>
+          )}
         </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
         {detail.leagues.map((l) => (
-          <LeagueCard key={l.id} league={l} matches={detail.matches} prevRecords={prevRecords} store={store} onSelect={onSelect} onChanged={onChanged} />
+          <LeagueCard key={l.id} league={l} matches={detail.matches} readOnly={readOnly} prevRecords={prevRecords} store={store} onSelect={onSelect} onChanged={onChanged} />
         ))}
       </div>
 
@@ -370,11 +393,11 @@ function LiveEvent({ store, detail, loading, prevRecords, onSelect, onChanged }:
         <Modal onClose={() => setConfirmFinish(false)}>
           <div className="px-5 py-5">
             <h3 className="text-lg font-bold">Finish this season?</h3>
-            <p className="mt-1 text-sm text-ink-500">Ratings are saved after each match — finishing archives the season so you can start the next one with promotion/relegation.</p>
+            <p className="mt-1 text-sm text-ink-500">Ratings are saved after each match. Finishing keeps the season viewable in the hub, and lets you start the next one (re-seeded by wins).</p>
           </div>
           <div className="flex gap-2 border-t hairline px-5 py-4">
             <button onClick={() => setConfirmFinish(false)} className="glass-soft tap flex-1 rounded-xl py-2.5 text-sm font-semibold text-ink-300">Keep open</button>
-            <button onClick={async () => { await finishEvent(detail.event.id); await store.refresh(); setConfirmFinish(false) }} className="tap flex-1 rounded-xl bg-gradient-to-br from-brand to-brand2 py-2.5 text-sm font-bold text-white glow-brand">Finish &amp; archive</button>
+            <button onClick={async () => { await finishEvent(detail.event.id); await store.refresh(); setConfirmFinish(false); onChanged() }} className="tap flex-1 rounded-xl bg-gradient-to-br from-brand to-brand2 py-2.5 text-sm font-bold text-white glow-brand">Finish season</button>
           </div>
         </Modal>
       )}
@@ -382,8 +405,8 @@ function LiveEvent({ store, detail, loading, prevRecords, onSelect, onChanged }:
   )
 }
 
-function LeagueCard({ league, matches, prevRecords, store, onSelect, onChanged }: {
-  league: LeagueWithPlayers; matches: Match[]; prevRecords?: Map<string, WL> | null; store: Store; onSelect: (id: string) => void; onChanged: () => void
+function LeagueCard({ league, matches, readOnly, prevRecords, store, onSelect, onChanged }: {
+  league: LeagueWithPlayers; matches: Match[]; readOnly: boolean; prevRecords?: Map<string, WL> | null; store: Store; onSelect: (id: string) => void; onChanged: () => void
 }) {
   const [openKey, setOpenKey] = useState<string | null>(null)
   const fx = fixtures(league)
@@ -431,7 +454,7 @@ function LeagueCard({ league, matches, prevRecords, store, onSelect, onChanged }
             const m = findMatch(matches, f[0].id, f[1].id)
             const key = `${f[0].id}:${f[1].id}`
             return (
-              <FixtureRow key={key} a={f[0]} b={f[1]} match={m} open={openKey === key} onToggle={() => setOpenKey(openKey === key ? null : key)} format={league.format} leagueId={league.id} eventId={league.eventId} store={store} onDone={() => { setOpenKey(null); onChanged() }} />
+              <FixtureRow key={key} a={f[0]} b={f[1]} match={m} readOnly={readOnly} open={openKey === key} onToggle={() => setOpenKey(openKey === key ? null : key)} format={league.format} leagueId={league.id} eventId={league.eventId} store={store} onDone={() => { setOpenKey(null); onChanged() }} />
             )
           })}
         </div>
@@ -440,8 +463,8 @@ function LeagueCard({ league, matches, prevRecords, store, onSelect, onChanged }
   )
 }
 
-function FixtureRow({ a, b, match, open, onToggle, format, leagueId, eventId, store, onDone }: {
-  a: Player; b: Player; match?: Match; open: boolean; onToggle: () => void; format: string; leagueId: string; eventId: string; store: Store; onDone: () => void
+function FixtureRow({ a, b, match, readOnly, open, onToggle, format, leagueId, eventId, store, onDone }: {
+  a: Player; b: Player; match?: Match; readOnly: boolean; open: boolean; onToggle: () => void; format: string; leagueId: string; eventId: string; store: Store; onDone: () => void
 }) {
   const [sa, setSa] = useState(11)
   const [sb, setSb] = useState(7)
@@ -457,6 +480,17 @@ function FixtureRow({ a, b, match, open, onToggle, format, leagueId, eventId, st
         <span className="font-mono font-bold">{aScore}</span><span className="text-ink-600">:</span><span className="font-mono font-bold">{bScore}</span>
         <span className={`flex-1 truncate ${!aWon ? 'font-bold' : 'text-ink-500'}`}>{b.name}</span>
         <span className="text-win">✓</span>
+      </div>
+    )
+  }
+
+  if (readOnly) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm text-ink-500">
+        <span className="flex-1 truncate text-right">{a.name}</span>
+        <span className="rounded-md bg-white/5 px-2 py-0.5 text-[11px]">vs</span>
+        <span className="flex-1 truncate">{b.name}</span>
+        <span className="text-[10px] uppercase">unplayed</span>
       </div>
     )
   }
@@ -561,17 +595,6 @@ function Seg<T extends string>({ value, onChange, options }: { value: T; onChang
       {options.map(([v, label]) => (
         <button key={v} onClick={() => onChange(v)} className={`tap rounded-lg px-3 py-1.5 text-xs font-bold transition ${value === v ? 'bg-white/12 text-white' : 'text-ink-500 hover:text-ink-300'}`}>{label}</button>
       ))}
-    </div>
-  )
-}
-
-function UpDown({ value, onChange }: { value: number; onChange: (v: number) => void }) {
-  return (
-    <div className="glass-soft flex items-center gap-1.5 rounded-xl px-2 py-1.5" title="Players promoted/relegated per boundary">
-      <span className="text-[11px] uppercase tracking-wide text-ink-500">Up/down</span>
-      <button onClick={() => onChange(Math.max(0, value - 1))} className="tap grid h-6 w-6 place-items-center rounded-lg bg-white/8 font-bold text-ink-400 hover:text-white">−</button>
-      <span className="w-4 text-center font-mono font-bold">{value}</span>
-      <button onClick={() => onChange(Math.min(5, value + 1))} className="tap grid h-6 w-6 place-items-center rounded-lg bg-white/8 font-bold text-ink-400 hover:text-white">+</button>
     </div>
   )
 }

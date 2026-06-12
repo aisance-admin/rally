@@ -5,7 +5,6 @@ import { MatchesFeed } from './components/MatchesFeed'
 import { EventRunner } from './components/EventRunner'
 import { PlayersAdmin } from './components/PlayersAdmin'
 import { PlayerModal } from './components/PlayerModal'
-import { RecordMatchModal } from './components/RecordMatchModal'
 import { Modal } from './components/Modal'
 
 type Tab = 'leaderboard' | 'roster' | 'events' | 'matches'
@@ -21,7 +20,6 @@ export default function App() {
   const store = useStore()
   const [tab, setTab] = useState<Tab>('leaderboard')
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [recording, setRecording] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const [busy, setBusy] = useState(false)
 
@@ -140,17 +138,13 @@ export default function App() {
           {tab === 'roster' && <PlayersAdmin store={store} onSelect={setSelectedId} />}
           {tab === 'events' && <EventRunner store={store} onSelect={setSelectedId} />}
           {tab === 'matches' && (
-            <MatchesFeed matches={store.matches} players={store.players} divisions={store.divisions} onSelect={setSelectedId} onRecord={() => setRecording(true)} />
+            <MatchesFeed matches={store.matches} players={store.players} divisions={store.divisions} onSelect={setSelectedId} />
           )}
         </main>
       </div>
 
       {selected && (
         <PlayerModal player={selected} players={store.players} divisions={store.divisions} matches={store.matches} onClose={() => setSelectedId(null)} onSelect={setSelectedId} />
-      )}
-
-      {recording && (
-        <RecordMatchModal players={store.players} onClose={() => setRecording(false)} onSubmit={store.recordMatch} />
       )}
 
       {confirmClear && (

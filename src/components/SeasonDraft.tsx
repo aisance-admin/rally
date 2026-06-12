@@ -123,7 +123,7 @@ export function DivisionDraft({
       {note && <div className="glass-soft rounded-2xl px-4 py-2.5 text-xs text-ink-400">{note}</div>}
       {tooSmall.length > 0 && (
         <div className="rounded-2xl bg-loss/10 px-4 py-2.5 text-xs font-medium text-loss ring-1 ring-loss/25">
-          A league needs at least 2 players — {tooSmall.map((d) => d.name).join(', ')} {tooSmall.length === 1 ? 'has' : 'have'} just one. Move someone in or remove the league.
+          A division needs at least 2 players — {tooSmall.map((d) => d.name).join(', ')} {tooSmall.length === 1 ? 'has' : 'have'} just one. Move someone in or remove the division.
         </div>
       )}
 
@@ -165,13 +165,13 @@ export function DivisionDraft({
       </div>
 
       <button onClick={addDivision} className="tap w-full rounded-2xl border border-dashed hairline py-2.5 text-xs font-semibold text-ink-500 hover:text-white">
-        ＋ Add a league
+        ＋ Add a division
       </button>
 
       <div className="glass overflow-hidden rounded-3xl">
         <div className="px-4 py-3 text-sm font-bold">
           Sitting out <span className="text-ink-500">· {bench.length}</span>
-          <span className="ml-2 text-[11px] font-normal text-ink-500">tap a league to add them in</span>
+          <span className="ml-2 text-[11px] font-normal text-ink-500">tap a division to add them in</span>
         </div>
         {bench.length === 0 ? (
           <div className="px-4 py-5 text-center text-xs text-ink-500">Everyone's placed.</div>

@@ -8,13 +8,11 @@ export function MatchesFeed({
   players,
   divisions,
   onSelect,
-  onRecord,
 }: {
   matches: Match[]
   players: Player[]
   divisions: Division[]
   onSelect: (id: string) => void
-  onRecord: () => void
 }) {
   const pById = useMemo(() => Object.fromEntries(players.map((p) => [p.id, p])), [players])
   const dById = useMemo(() => Object.fromEntries(divisions.map((d) => [d.id, d])), [divisions])
@@ -23,15 +21,9 @@ export function MatchesFeed({
     <div className="animate-fade">
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-ink-500">
-          Recent matches · {matches.length}
+          Match history · {matches.length}
         </h2>
-        <button
-          onClick={onRecord}
-          disabled={players.length < 2}
-          className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-sm font-bold text-white glow-brand disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
-        >
-          + Record match
-        </button>
+        <span className="text-[11px] text-ink-500">Recorded inside each league's division pages</span>
       </div>
       <div className="stagger space-y-2">
         {matches.map((m) => {

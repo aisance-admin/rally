@@ -2,7 +2,7 @@ import { supabase } from './supabase'
 import { manualSizes } from './planner'
 import type { EventDetail, LeagueEvent, LeagueWithPlayers, Match, Player } from '../types'
 
-export const LEAGUE_NAMES = ['Elite', 'Division 1', 'Division 2', 'Division 3', 'Division 4', 'Division 5', 'Division 6', 'Division 7']
+export const LEAGUE_NAMES = ['Division 1', 'Division 2', 'Division 3', 'Division 4', 'Division 5', 'Division 6', 'Division 7', 'Division 8']
 export const LEAGUE_COLORS = ['#ff5a3c', '#ff8a3d', '#ffc24b', '#5ed6a0', '#5aa9ff', '#a78bff', '#ff6ab0', '#46d6c4']
 
 /** Max leagues so every league has ≥2 players and there are fewer leagues than players. */
@@ -161,17 +161,49 @@ export function applyPromoteRelegate(orig: Player[][], n: number): Player[][] {
   })
 }
 
-/** Build the default division layout for the next season from a finished season. */
-export function computeNextSeasonDivisions(prev: EventDetail, promoteN: number): DraftDivision[] {
-  const orig = [...prev.leagues]
-    .sort((a, b) => a.tier - b.tier)
-    .map((l) => standingsOrder(l, prev.matches))
-  const moved = applyPromoteRelegate(orig, promoteN)
-  return moved.map((players, i) => ({
-    name: LEAGUE_NAMES[i] ?? `League ${i + 1}`,
-    color: LEAGUE_COLORS[i] ?? '#9aa4b2',
-    players,
-  }))
+/** Global ranking of a season's players by wins → game difference → rating. */
+export function globalSeasonRanking(prev: EventDetail): Player[] {
+  const players: Player[] = []
+  for (const l of prev.leagues) for (const p of l.players) players.push(p)
+  const stat = new Map<string, { wins: number; diff: number }>()
+  for (const p of players) stat.set(p.id, { wins: 0, diff: 0 })
+  for (const m of prev.matches) {
+    const a = stat.get(m.playerAId)
+    const b = stat.get(m.playerBId)
+    if (a) {
+      a.diff += m.scoreA - m.scoreB
+      if (m.winnerId === m.playerAId) a.wins++
+    }
+    if (b) {
+      b.diff += m.scoreB - m.scoreA
+      if (m.winnerId === m.playerBId) b.wins++
+    }
+  }
+  return [...players].sort((p, q) => {
+    const sp = stat.get(p.id)!
+    const sq = stat.get(q.id)!
+    return sq.wins - sp.wins || sq.diff - sp.diff || q.elo - p.elo
+  })
+}
+
+/** Next-season layout: re-rank EVERY player by last season's wins and slot them
+ *  top-down into the same number of divisions. Division 1 = most wins, so a 2-2
+ *  player outranks a 0-0 player regardless of which division they were in. */
+export function computeNextSeasonDivisions(prev: EventDetail): DraftDivision[] {
+  const ranked = globalSeasonRanking(prev)
+  const numDiv = Math.max(1, prev.leagues.length)
+  const sizes = manualSizes(ranked.length, numDiv)
+  const divs: DraftDivision[] = []
+  let idx = 0
+  sizes.forEach((sz, i) => {
+    divs.push({
+      name: LEAGUE_NAMES[i] ?? `Division ${i + 1}`,
+      color: LEAGUE_COLORS[i] ?? '#9aa4b2',
+      players: ranked.slice(idx, idx + sz),
+    })
+    idx += sz
+  })
+  return divs
 }
 
 /** Persist a new season from an explicit (admin-adjusted) division layout. */
