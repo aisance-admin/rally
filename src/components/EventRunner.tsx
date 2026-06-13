@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import type { EventDetail, LeagueWithPlayers, Match, Player } from '../types'
+import type { MatchOpResult } from '../lib/api'
 import type { Store } from '../lib/store'
 import { manualSizes, roundRobin } from '../lib/planner'
 import { deleteEvent, fetchEventDetail, finishEvent } from '../lib/events'
@@ -7,14 +8,26 @@ import { Avatar } from './bits'
 import { SkillBadge } from './SkillBadge'
 import { Modal } from './Modal'
 import { DivisionDraft } from './SeasonDraft'
+import { GroupSheet, TieChip } from './GroupSheet'
 import {
+  buildDivisionsFromQualifier,
   buildInitialDivisions,
-  computeNextSeasonDivisions,
+  DEFAULT_PROMOTION,
+  defaultQualifierMapping,
+  type DraftDivision,
+  type FormationMode,
+  generateNextSeasonDivisions,
   groupSeries,
   LEAGUE_COLORS,
   LEAGUE_NAMES,
   maxLeaguesFor,
+  parseFormat,
+  previewDivisionSizes,
+  type PromotionConfig,
+  rankDivision,
+  type RankedPlayer,
   seasonRecordsFor,
+  tierByPlayer,
   type WL,
 } from '../lib/seasons'
 
@@ -23,19 +36,31 @@ interface FirstCfg {
   name: string
   players: Player[]
   divisions: number
+  qualifier: boolean
 }
 
+type View = 'hub' | 'season' | 'setup' | 'draft' | 'qualDraft' | 'mapping'
+
 export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: string) => void }) {
-  const [view, setView] = useState<'hub' | 'season' | 'setup' | 'draft'>('hub')
+  const [view, setView] = useState<View>('hub')
   const [openId, setOpenId] = useState<string | null>(null)
   const [detail, setDetail] = useState<EventDetail | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [prevRecords, setPrevRecords] = useState<Map<string, WL> | null>(null)
+  const [prevTiers, setPrevTiers] = useState<Map<string, number> | null>(null)
 
   const [firstCfg, setFirstCfg] = useState<FirstCfg | null>(null)
-  const [firstMethod, setFirstMethod] = useState<'elo' | 'random'>('elo')
+  const [firstMethod, setFirstMethod] = useState<FormationMode>('elo')
+  const [format, setFormat] = useState('1 set to 11')
   const [reseed, setReseed] = useState(0)
   const [draftPrev, setDraftPrev] = useState<EventDetail | null>(null)
+  const [promotionCfg, setPromotionCfg] = useState<PromotionConfig>(DEFAULT_PROMOTION)
+
+  // qualifier → divisions flow
+  const [builtDivisions, setBuiltDivisions] = useState<DraftDivision[] | null>(null)
+  const [qualEventId, setQualEventId] = useState<string | null>(null)
+  const [mapDetail, setMapDetail] = useState<EventDetail | null>(null)
+  const [mapping, setMapping] = useState<Record<number, number>>({})
 
   const openReq = useRef(0)
   const openSeason = async (id: string) => {
@@ -44,6 +69,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
     setView('season')
     setDetail(null)
     setPrevRecords(null)
+    setPrevTiers(null)
     setLoadingDetail(true)
     try {
       const d = await fetchEventDetail(id)
@@ -51,38 +77,77 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
       setDetail(d)
       if (d.event.season > 1) {
         const prev = store.events.find((e) => e.seriesId === d.event.seriesId && e.season === d.event.season - 1)
-        const pr = prev ? seasonRecordsFor(await fetchEventDetail(prev.id)) : null
-        if (openReq.current === req) setPrevRecords(pr)
+        if (prev && prev.season >= 1) {
+          const pd = await fetchEventDetail(prev.id)
+          if (openReq.current === req) { setPrevRecords(seasonRecordsFor(pd)); setPrevTiers(tierByPlayer(pd)) }
+        }
       }
     } finally {
       if (openReq.current === req) setLoadingDetail(false)
     }
   }
-  const backToHub = () => { setView('hub'); setOpenId(null); setDetail(null); setFirstCfg(null); setDraftPrev(null) }
+  const backToHub = () => { setView('hub'); setOpenId(null); setDetail(null); setFirstCfg(null); setDraftPrev(null); setBuiltDivisions(null); setQualEventId(null); setMapDetail(null) }
   const startNext = async (prevId: string) => { setDraftPrev(await fetchEventDetail(prevId)); setView('draft') }
 
-  const firstDivisions = useMemo(
-    () => (firstCfg ? buildInitialDivisions(firstCfg.players, firstCfg.divisions, firstMethod) : []),
-    [firstCfg, firstMethod, reseed],
-  )
-  const nextDivisions = useMemo(() => (draftPrev ? computeNextSeasonDivisions(draftPrev) : []), [draftPrev])
+  const firstDivisions = useMemo(() => {
+    if (builtDivisions) return builtDivisions
+    return firstCfg ? buildInitialDivisions(firstCfg.players, firstCfg.divisions, firstMethod) : []
+  }, [firstCfg, firstMethod, reseed, builtDivisions])
+  const nextDivisions = useMemo(() => (draftPrev ? generateNextSeasonDivisions(draftPrev, promotionCfg) : []), [draftPrev, promotionCfg])
   const nextRecords = useMemo(() => (draftPrev ? seasonRecordsFor(draftPrev) : null), [draftPrev])
+  const nextPreview = useMemo(() => {
+    if (!draftPrev) return null
+    const orig = [...draftPrev.leagues].sort((a, b) => a.tier - b.tier).map((l) => l.players)
+    return previewDivisionSizes(orig, promotionCfg)
+  }, [draftPrev, promotionCfg])
 
   const series = useMemo(() => groupSeries(store.events), [store.events])
   const openSeries = openId ? series.find((s) => s.seasons.some((x) => x.id === openId)) : null
   const isLatestDone = !!(openSeries && detail && openSeries.seasons[openSeries.seasons.length - 1].id === openId && detail.event.status === 'done')
 
+  const formatControls = (withReshuffle: boolean) => (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <Seg value={firstMethod} onChange={setFirstMethod} options={[['elo', 'By rating'], ['random', 'Random'], ['manual', 'Manual']]} />
+      <FormatControl value={format} onChange={setFormat} />
+      {withReshuffle && firstMethod === 'random' && (
+        <button onClick={() => setReseed((r) => r + 1)} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white">🎲 Reshuffle</button>
+      )}
+    </div>
+  )
+
   if (view === 'setup') {
     return (
       <Setup
         store={store}
-        onConfigured={(cfg, method) => { setFirstCfg(cfg); setFirstMethod(method); setView('draft') }}
+        onConfigured={(cfg, method, fmt) => { setFirstCfg(cfg); setFirstMethod(method); setFormat(fmt); setBuiltDivisions(null); setQualEventId(null); setView(cfg.qualifier ? 'qualDraft' : 'draft') }}
         onCancel={backToHub}
       />
     )
   }
 
+  // qualifier seeding round — form the qualification groups
+  if (view === 'qualDraft' && firstCfg) {
+    return (
+      <DivisionDraft
+        store={store}
+        seriesId={firstCfg.seriesId}
+        seriesName={firstCfg.name}
+        season={0}
+        initialDivisions={firstDivisions}
+        subtitle="Qualifier · seeding groups"
+        startLabel="Start qualifier"
+        createOpts={{ status: 'qualifying', format }}
+        note={<>Everyone plays these groups first. Their finishing position decides which division they start in. {firstMethod === 'manual' ? 'Add players to each group below.' : 'Move anyone with ▲▼.'}</>}
+        controls={formatControls(true)}
+        onStarted={(id) => openSeason(id)}
+        onCancel={backToHub}
+      />
+    )
+  }
+
+  // first season (direct) OR season 1 built from a finished qualifier
   if (view === 'draft' && firstCfg) {
+    const fromQual = !!builtDivisions
     return (
       <DivisionDraft
         store={store}
@@ -90,17 +155,16 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
         seriesName={firstCfg.name}
         season={1}
         initialDivisions={firstDivisions}
-        subtitle={firstMethod === 'random' ? 'First season · random split' : 'First season · seeded by rating'}
-        note={<>Players are split {firstMethod === 'random' ? 'randomly' : 'by rating'}. Move anyone with ▲▼, sit them out with ✕, or add benched players below.</>}
-        controls={
-          <div className="flex items-center gap-1.5">
-            <Seg value={firstMethod} onChange={setFirstMethod} options={[['elo', 'By rating'], ['random', 'Random']]} />
-            {firstMethod === 'random' && (
-              <button onClick={() => setReseed((r) => r + 1)} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white">🎲 Reshuffle</button>
-            )}
-          </div>
-        }
-        onStarted={(id) => { setFirstCfg(null); openSeason(id) }}
+        subtitle={fromQual ? 'Season 1 · seeded from qualifier' : firstMethod === 'random' ? 'First season · random split' : firstMethod === 'manual' ? 'First season · place players by hand' : 'First season · seeded by rating'}
+        createOpts={{ status: 'live', format }}
+        note={fromQual
+          ? <>Divisions built from the qualifier results. Adjust anyone with ▲▼ before you start.</>
+          : <>Players are split {firstMethod === 'random' ? 'randomly' : firstMethod === 'manual' ? 'by you' : 'by rating'}. Move anyone with ▲▼, sit them out with ✕, or add benched players below.</>}
+        controls={fromQual ? <FormatControl value={format} onChange={setFormat} /> : formatControls(true)}
+        onStarted={async (id) => {
+          if (qualEventId) { await finishEvent(qualEventId); setQualEventId(null); await store.refresh() }
+          setBuiltDivisions(null); setFirstCfg(null); openSeason(id)
+        }}
         onCancel={backToHub}
       />
     )
@@ -116,10 +180,29 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
         initialDivisions={nextDivisions}
         prevRecords={nextRecords}
         prevSeasonNo={draftPrev.event.season}
-        subtitle={`Re-seeded by Season ${draftPrev.event.season} wins`}
-        note={<>Everyone is re-ranked by last season's <span className="text-win">wins</span> (then game difference) — Division 1 holds the players with the most wins. Move anyone by hand with ▲▼.</>}
+        subtitle={`Promotion / relegation from Season ${draftPrev.event.season}`}
+        createOpts={{ status: 'live', format }}
+        note={<>Divisions are kept. The top {promotionCfg.up} of each division move <span className="text-win">up</span>, the bottom {promotionCfg.down} move <span className="text-loss">down</span> — everyone else stays. {nextPreview?.warning && <span className="text-brand-400"> {nextPreview.warning}</span>}</>}
+        controls={<div className="flex flex-wrap items-center gap-1.5"><PromoteControl cfg={promotionCfg} onChange={setPromotionCfg} /><FormatControl value={format} onChange={setFormat} /></div>}
         onStarted={(id) => { setDraftPrev(null); openSeason(id) }}
         onCancel={backToHub}
+      />
+    )
+  }
+
+  if (view === 'mapping' && mapDetail) {
+    return (
+      <MappingEditor
+        qual={mapDetail}
+        mapping={mapping}
+        onChange={setMapping}
+        onBuild={(divs) => {
+          setBuiltDivisions(divs)
+          setQualEventId(mapDetail.event.id)
+          setFirstCfg({ seriesId: mapDetail.event.seriesId, name: mapDetail.event.name, players: [], divisions: divs.length, qualifier: false })
+          setView('draft')
+        }}
+        onCancel={() => openSeason(mapDetail.event.id)}
       />
     )
   }
@@ -136,16 +219,24 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
   if (view === 'season' && detail) {
     return (
       <SeasonView
+        key={detail.event.id}
         store={store}
         detail={detail}
         loading={loadingDetail}
         readOnly={detail.event.status === 'done'}
         canStartNext={isLatestDone}
         prevRecords={prevRecords}
+        prevTiers={prevTiers}
         onSelect={onSelect}
         onChanged={() => openId && openSeason(openId)}
         onBack={backToHub}
         onStartNext={() => startNext(detail.event.id)}
+        onFormDivisions={() => {
+          const maxPos = Math.max(1, ...detail.leagues.map((l) => l.players.length))
+          setMapDetail(detail)
+          setMapping(defaultQualifierMapping(maxPos))
+          setView('mapping')
+        }}
       />
     )
   }
@@ -157,7 +248,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
 
 function SeasonHub({ store, onOpen, onNewSeries, onStartNext }: { store: Store; onOpen: (id: string) => void; onNewSeries: () => void; onStartNext: (id: string) => void }) {
   const series = useMemo(() => groupSeries(store.events), [store.events])
-  const live = store.events.find((e) => e.status === 'live')
+  const live = store.events.find((e) => e.status === 'live' || e.status === 'qualifying')
 
   if (store.players.length === 0)
     return <Empty icon="📋" title="No roster yet" body={<>Add players in the <span className="font-semibold text-brand">Roster</span> tab (or load the sample roster) first.</>} />
@@ -167,7 +258,7 @@ function SeasonHub({ store, onOpen, onNewSeries, onStartNext }: { store: Store; 
       <div className="glass grid place-items-center rounded-3xl py-16 text-center">
         <div className="text-5xl">🏆</div>
         <div className="mt-3 text-lg font-semibold">No leagues yet</div>
-        <div className="mt-1 max-w-sm text-sm text-ink-500">Start a league and play seasons. Each new season re-seeds players by last season's wins.</div>
+        <div className="mt-1 max-w-sm text-sm text-ink-500">Start a league and play seasons. Each season, the winner of every division goes up and the last goes down.</div>
         <button onClick={onNewSeries} className="tap mt-5 rounded-2xl bg-gradient-to-br from-brand to-brand2 px-5 py-3 text-sm font-bold text-white glow-brand">＋ Start a league</button>
       </div>
     )
@@ -182,7 +273,7 @@ function SeasonHub({ store, onOpen, onNewSeries, onStartNext }: { store: Store; 
       {live && (
         <button onClick={() => onOpen(live.id)} className="glass tap lift flex w-full items-center gap-3 rounded-2xl px-4 py-3" style={{ background: 'linear-gradient(90deg, rgba(52,211,153,0.16), rgba(255,255,255,0.04))' }}>
           <span className="h-2 w-2 rounded-full bg-win pulse-dot" />
-          <span className="flex-1 text-left text-sm font-bold">Resume {live.name} · Season {live.season}</span>
+          <span className="flex-1 text-left text-sm font-bold">Resume {live.name} · {live.status === 'qualifying' ? 'Qualifier' : `Season ${live.season}`}</span>
           <span className="text-xs font-semibold text-win">Open →</span>
         </button>
       )}
@@ -190,21 +281,25 @@ function SeasonHub({ store, onOpen, onNewSeries, onStartNext }: { store: Store; 
       <div className="stagger space-y-4">
         {series.map((s) => {
           const latest = s.seasons[s.seasons.length - 1]
+          const seasonsOnly = s.seasons.filter((e) => e.season >= 1)
+          const topSeason = seasonsOnly.length ? seasonsOnly[seasonsOnly.length - 1].season : 0
           return (
             <div key={s.seriesId} className="glass overflow-hidden rounded-3xl">
               <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-4">
                 <div>
                   <div className="text-base font-extrabold">{s.name}</div>
-                  <div className="text-xs text-ink-500">{s.seasons.length} season{s.seasons.length === 1 ? '' : 's'}</div>
+                  <div className="text-xs text-ink-500">{seasonsOnly.length} season{seasonsOnly.length === 1 ? '' : 's'}</div>
                 </div>
-                <button onClick={() => onStartNext(latest.id)} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-xs font-bold text-white glow-brand">⚡ Start Season {latest.season + 1}</button>
+                {latest.status === 'done' && (
+                  <button onClick={() => onStartNext(latest.id)} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-xs font-bold text-white glow-brand">⚡ Start Season {topSeason + 1}</button>
+                )}
               </div>
               <div className="divide-hair border-t hairline">
                 {[...s.seasons].reverse().map((ev) => (
                   <button key={ev.id} onClick={() => onOpen(ev.id)} className="tap flex w-full items-center gap-3 px-5 py-3 text-left hover:bg-white/5">
-                    <span className="grid h-7 w-7 place-items-center rounded-xl bg-white/8 font-mono text-xs font-bold text-ink-300">S{ev.season}</span>
-                    <span className="flex-1 text-sm font-semibold">Season {ev.season}</span>
-                    <span className="text-xs text-ink-500">{ev.participantIds.length} players · {ev.tables} divisions</span>
+                    <span className="grid h-7 w-7 place-items-center rounded-xl bg-white/8 font-mono text-xs font-bold text-ink-300">{ev.season >= 1 ? `S${ev.season}` : 'Q'}</span>
+                    <span className="flex-1 text-sm font-semibold">{ev.season >= 1 ? `Season ${ev.season}` : 'Qualifier'}</span>
+                    <span className="text-xs text-ink-500">{ev.participantIds.length} players · {ev.tables} {ev.season >= 1 ? 'divisions' : 'groups'}</span>
                     <StatusPill status={ev.status} />
                     <span className="text-ink-600">›</span>
                   </button>
@@ -222,6 +317,7 @@ function StatusPill({ status }: { status: string }) {
   const map: Record<string, { c: string; t: string }> = {
     done: { c: '#9aa4b2', t: 'Final' },
     live: { c: '#34d399', t: 'Live' },
+    qualifying: { c: '#ff8a3d', t: 'Qualifier' },
     draft: { c: '#5aa9ff', t: 'Draft' },
   }
   const s = map[status] ?? map.draft
@@ -230,9 +326,11 @@ function StatusPill({ status }: { status: string }) {
 
 // ───────────────────────── setup ─────────────────────────
 
-function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: (cfg: FirstCfg, method: 'elo' | 'random') => void; onCancel?: () => void }) {
+function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: (cfg: FirstCfg, method: FormationMode, format: string) => void; onCancel?: () => void }) {
   const [name, setName] = useState('League Night')
-  const [method, setMethod] = useState<'elo' | 'random'>('elo')
+  const [method, setMethod] = useState<FormationMode>('elo')
+  const [format, setFormat] = useState('1 set to 11')
+  const [qualifier, setQualifier] = useState(false)
   const [unchecked, setUnchecked] = useState<Set<string>>(() => new Set())
   const [numDiv, setNumDiv] = useState(4)
 
@@ -247,9 +345,11 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
   const setPerDiv = (per: number) => { if (per > 0 && count > 0) setNumDiv(Math.max(1, Math.min(maxDiv, Math.round(count / per)))) }
   const toggle = (id: string) => setUnchecked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
 
+  const unit = qualifier ? 'groups' : 'divisions'
+
   function go() {
     if (count < 2) return
-    onConfigured({ seriesId: crypto.randomUUID(), name: name.trim() || 'League Night', players: store.players.filter((p) => isIn(p.id)), divisions }, method)
+    onConfigured({ seriesId: crypto.randomUUID(), name: name.trim() || 'League Night', players: store.players.filter((p) => isIn(p.id)), divisions, qualifier }, method, format)
   }
 
   if (store.players.length === 0)
@@ -265,19 +365,33 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
           </div>
           <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-xl bg-white/5 px-3.5 py-2.5 text-sm font-semibold outline-none ring-1 ring-white/10 focus:ring-brand/60" placeholder="League name (e.g. Thursday Night)" />
           <div>
-            <div className="mb-1.5 text-[11px] uppercase tracking-wide text-ink-500">First-season split</div>
-            <div className="grid grid-cols-2 gap-2">
-              <MethodCard active={method === 'elo'} onClick={() => setMethod('elo')} title="By rating" desc="Strongest players seed the top divisions." icon="📊" />
-              <MethodCard active={method === 'random'} onClick={() => setMethod('random')} title="Random" desc="Shuffle players across divisions." icon="🎲" />
+            <div className="mb-1.5 text-[11px] uppercase tracking-wide text-ink-500">{qualifier ? 'How qualifier groups are formed' : 'First-season split'}</div>
+            <div className="grid grid-cols-3 gap-2">
+              <MethodCard active={method === 'elo'} onClick={() => setMethod('elo')} title="By rating" desc="Seed strongest first." icon="📊" />
+              <MethodCard active={method === 'random'} onClick={() => setMethod('random')} title="Random" desc="Shuffle players." icon="🎲" />
+              <MethodCard active={method === 'manual'} onClick={() => setMethod('manual')} title="Manual" desc="Place by hand." icon="✋" />
             </div>
           </div>
+          <div>
+            <div className="mb-1.5 text-[11px] uppercase tracking-wide text-ink-500">Match format</div>
+            <FormatControl value={format} onChange={setFormat} />
+          </div>
+          <button onClick={() => setQualifier((q) => !q)} className="tap flex w-full items-center justify-between rounded-2xl bg-white/5 px-3.5 py-2.5 ring-1 ring-white/8">
+            <span className="text-left">
+              <span className="block text-sm font-semibold">Run a qualifier first</span>
+              <span className="block text-[11px] text-ink-500">Everyone plays seeding groups; results set the divisions.</span>
+            </span>
+            <span className={`grid h-6 w-11 place-items-start rounded-full p-0.5 transition ${qualifier ? 'bg-win/80' : 'bg-white/12'}`}>
+              <span className="h-5 w-5 rounded-full bg-white transition-transform" style={{ transform: qualifier ? 'translateX(20px)' : 'translateX(0)' }} />
+            </span>
+          </button>
         </div>
 
         <div className="glass space-y-3 rounded-3xl p-5">
-          <h2 className="text-sm font-bold uppercase tracking-wider text-ink-500">Divisions</h2>
+          <h2 className="text-sm font-bold uppercase tracking-wider text-ink-500">{qualifier ? 'Qualifier groups' : 'Divisions'}</h2>
           <div className="grid grid-cols-2 gap-3">
-            <NumControl label="Divisions" value={divisions} min={1} max={maxDiv} onChange={setNumDiv} />
-            <NumControl label="Players / division" value={perDiv} min={2} max={Math.max(2, count)} onChange={setPerDiv} />
+            <NumControl label={qualifier ? 'Groups' : 'Divisions'} value={divisions} min={1} max={maxDiv} onChange={setNumDiv} />
+            <NumControl label={`Players / ${qualifier ? 'group' : 'division'}`} value={perDiv} min={2} max={Math.max(2, count)} onChange={setPerDiv} />
           </div>
           <p className="text-[11px] text-ink-500">{count} playing → sizes <span className="font-mono text-ink-300">{sizes.join(' · ') || '—'}</span> <span className="text-ink-600">(max {maxDiv})</span></p>
         </div>
@@ -309,46 +423,148 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
       <div className="space-y-4">
         <div className="grid grid-cols-3 gap-3">
           <Kpi label="Playing" value={String(count)} />
-          <Kpi label="Divisions" value={String(divisions)} />
-          <Kpi label="Per division" value={String(perDiv)} />
+          <Kpi label={qualifier ? 'Groups' : 'Divisions'} value={String(divisions)} />
+          <Kpi label={`Per ${qualifier ? 'group' : 'division'}`} value={String(perDiv)} />
         </div>
 
         <div className="glass overflow-hidden rounded-3xl">
           <div className="grid grid-cols-[1fr_90px] gap-2 px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-ink-500">
-            <span>Division</span><span className="text-right">Players</span>
+            <span>{qualifier ? 'Group' : 'Division'}</span><span className="text-right">Players</span>
           </div>
           <div className="divide-hair">
             {sizes.map((sz, i) => (
               <div key={i} className="grid grid-cols-[1fr_90px] items-center gap-2 px-5 py-2.5 text-sm">
                 <span className="flex items-center gap-2 font-semibold">
                   <span className="h-2 w-2 rounded-full" style={{ background: LEAGUE_COLORS[i] ?? '#9aa4b2', boxShadow: `0 0 10px ${LEAGUE_COLORS[i] ?? '#9aa4b2'}` }} />
-                  {LEAGUE_NAMES[i] ?? `Division ${i + 1}`}
+                  {qualifier ? `Group ${i + 1}` : LEAGUE_NAMES[i] ?? `Division ${i + 1}`}
                 </span>
                 <span className="text-right font-mono">{sz}</span>
               </div>
             ))}
-            {sizes.length === 0 && <div className="px-5 py-6 text-center text-sm text-ink-500">Check in players to preview divisions.</div>}
+            {sizes.length === 0 && <div className="px-5 py-6 text-center text-sm text-ink-500">Check in players to preview {unit}.</div>}
           </div>
         </div>
 
         <button onClick={go} disabled={count < 2} className="tap w-full rounded-2xl bg-gradient-to-br from-brand to-brand2 py-3.5 text-base font-extrabold text-white glow-brand disabled:opacity-40 disabled:shadow-none">
-          {count < 2 ? 'Add at least 2 players' : `Build ${divisions} divisions →`}
+          {count < 2 ? 'Add at least 2 players' : qualifier ? `Build ${divisions} qualifier groups →` : `Build ${divisions} divisions →`}
         </button>
-        <p className="text-center text-[11px] text-ink-500">You can drag players between divisions on the next screen.</p>
+        <p className="text-center text-[11px] text-ink-500">You can adjust everything on the next screen.</p>
       </div>
     </div>
   )
 }
 
-// ───────────────────────── season view (live or final) ─────────────────────────
+// ───────────────────────── qualifier → division mapping (spec §6) ─────────────────────────
 
-function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecords, onSelect, onChanged, onBack, onStartNext }: {
-  store: Store; detail: EventDetail; loading: boolean; readOnly: boolean; canStartNext: boolean; prevRecords?: Map<string, WL> | null; onSelect: (id: string) => void; onChanged: () => void; onBack: () => void; onStartNext: () => void
+function MappingEditor({ qual, mapping, onChange, onBuild, onCancel }: {
+  qual: EventDetail; mapping: Record<number, number>; onChange: (m: Record<number, number>) => void; onBuild: (divs: DraftDivision[]) => void; onCancel: () => void
 }) {
+  const maxPos = Math.max(1, ...qual.leagues.map((l) => l.players.length))
+  const preview = useMemo(() => buildDivisionsFromQualifier(qual, mapping), [qual, mapping])
+  const maxDiv = preview.length
+  const setPos = (pos: number, div: number) => onChange({ ...mapping, [pos]: Math.max(1, div) })
+
+  return (
+    <div className="space-y-4">
+      <div className="glass flex flex-wrap items-center justify-between gap-3 rounded-3xl p-4">
+        <div>
+          <div className="text-lg font-extrabold">Form divisions from the qualifier</div>
+          <div className="mt-0.5 text-xs text-ink-500">Each finishing position lands in a division. Default: 1st of every group → Division 1, 2nd → Division 2, …</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={onCancel} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-400 hover:text-white">Cancel</button>
+          <button onClick={() => onBuild(preview)} disabled={!preview.length} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-4 py-2 text-xs font-bold text-white glow-brand disabled:opacity-40">Build Season 1 →</button>
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="glass overflow-hidden rounded-3xl">
+          <div className="px-4 py-3 text-sm font-bold">Position → Division</div>
+          <div className="divide-hair">
+            {Array.from({ length: maxPos }, (_, i) => i + 1).map((pos) => (
+              <div key={pos} className="flex items-center justify-between gap-2 px-4 py-2.5">
+                <span className="text-sm font-semibold">Finished <span className="font-mono text-brand-400">{ordinal(pos)}</span> in group</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-ink-500">→</span>
+                  <MiniStep value={mapping[pos] ?? pos} min={1} max={maxPos} onChange={(v) => setPos(pos, v)} />
+                  <span className="w-16 text-right text-xs font-semibold" style={{ color: LEAGUE_COLORS[(mapping[pos] ?? pos) - 1] ?? '#9aa4b2' }}>{LEAGUE_NAMES[(mapping[pos] ?? pos) - 1] ?? `Div ${mapping[pos] ?? pos}`}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="glass overflow-hidden rounded-3xl">
+          <div className="px-4 py-3 text-sm font-bold">Preview · {maxDiv} division{maxDiv === 1 ? '' : 's'}</div>
+          <div className="divide-hair">
+            {preview.map((d, i) => (
+              <div key={i} className="px-4 py-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full" style={{ background: d.color, boxShadow: `0 0 10px ${d.color}` }} />
+                  <span className="text-sm font-bold">{d.name}</span>
+                  <span className="rounded-md bg-white/8 px-1.5 text-xs font-semibold text-ink-400">{d.players.length}</span>
+                </div>
+                <div className="mt-1 truncate text-[11px] text-ink-500">{d.players.map((p) => p.name).join(', ')}</div>
+              </div>
+            ))}
+            {preview.length === 0 && <div className="px-4 py-6 text-center text-sm text-ink-500">Enter qualifier results first.</div>}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ───────────────────────── season view (live / qualifying / final) ─────────────────────────
+
+function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecords, prevTiers, onSelect, onChanged, onBack, onStartNext, onFormDivisions }: {
+  store: Store; detail: EventDetail; loading: boolean; readOnly: boolean; canStartNext: boolean; prevRecords?: Map<string, WL> | null; prevTiers?: Map<string, number> | null; onSelect: (id: string) => void; onChanged: () => void; onBack: () => void; onStartNext: () => void; onFormDivisions: () => void
+}) {
+  const [matches, setMatches] = useState<Match[]>(detail.matches)
+  const [validated, setValidated] = useState<Record<string, string | null>>(() => Object.fromEntries(detail.leagues.map((l) => [l.id, l.validatedAt])))
+  const [activeId, setActiveId] = useState<string | null>(null)
   const [confirmFinish, setConfirmFinish] = useState(false)
-  const totalFx = detail.leagues.reduce((s, l) => s + fixtures(l).length, 0)
-  const playedFx = detail.leagues.reduce((s, l) => s + fixtures(l).filter((f) => findMatch(detail.matches, f[0].id, f[1].id)).length, 0)
+
+  const isQualifying = detail.event.status === 'qualifying'
+  const leagues = detail.leagues
+  const totalFx = leagues.reduce((s, l) => s + fixtures(l).length, 0)
+  const playedFx = leagues.reduce((s, l) => s + fixtures(l).filter((f) => findMatch(matches, f[0].id, f[1].id)).length, 0)
   const pct = totalFx ? Math.round((playedFx / totalFx) * 100) : 0
+  const openGroups = leagues.filter((l) => validated[l.id] == null).length
+
+  const applyResult = (res: MatchOpResult) => setMatches((ms) => {
+    let next = ms
+    if (res.removedId) next = next.filter((m) => m.id !== res.removedId)
+    if (res.match) next = [...next.filter((m) => m.id !== res.match!.id), res.match]
+    return next
+  })
+  const doValidate = async (leagueId: string, on: boolean) => {
+    setValidated((v) => ({ ...v, [leagueId]: on ? new Date().toISOString() : null }))
+    try { await store.validateLeague(leagueId, on) } catch { setValidated((v) => ({ ...v, [leagueId]: on ? null : new Date().toISOString() })) }
+  }
+
+  const active = activeId ? leagues.find((l) => l.id === activeId) ?? null : null
+  if (active) {
+    const idx = leagues.findIndex((l) => l.id === active.id)
+    return (
+      <GroupSheet
+        league={active}
+        matches={matches}
+        readOnly={readOnly}
+        locked={validated[active.id] != null}
+        store={store}
+        eventId={detail.event.id}
+        index={idx + 1}
+        total={leagues.length}
+        prevRecords={prevRecords}
+        onMatchOp={applyResult}
+        onValidate={(on) => doValidate(active.id, on)}
+        onClose={() => setActiveId(null)}
+        onPrev={idx > 0 ? () => setActiveId(leagues[idx - 1].id) : undefined}
+        onNext={idx < leagues.length - 1 ? () => setActiveId(leagues[idx + 1].id) : undefined}
+      />
+    )
+  }
 
   return (
     <div className="space-y-4">
@@ -359,11 +575,11 @@ function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecord
             <div className="flex items-center gap-2">
               {readOnly ? <span className="h-2 w-2 rounded-full bg-ink-500" /> : <span className="h-2 w-2 rounded-full bg-win pulse-dot" />}
               <span className="truncate text-lg font-extrabold">{detail.event.name}</span>
-              <span className="rounded-lg bg-white/8 px-2 py-0.5 text-[11px] font-bold uppercase text-ink-300">Season {detail.event.season}</span>
+              <span className="rounded-lg bg-white/8 px-2 py-0.5 text-[11px] font-bold uppercase text-ink-300">{isQualifying ? 'Qualifier' : `Season ${detail.event.season}`}</span>
               <StatusPill status={detail.event.status} />
             </div>
             <div className="mt-1.5 flex items-center gap-2 text-xs text-ink-500">
-              <span>{detail.event.participantIds.length} players · {detail.leagues.length} divisions</span>
+              <span>{detail.event.participantIds.length} players · {leagues.length} {isQualifying ? 'groups' : 'divisions'}</span>
               <span className="h-1 w-20 overflow-hidden rounded-full bg-white/10"><span className="block h-full rounded-full" style={{ width: `${pct}%`, background: readOnly ? '#9aa4b2' : '#34d399' }} /></span>
               <span>{playedFx}/{totalFx}</span>
             </div>
@@ -372,6 +588,11 @@ function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecord
         <div className="flex gap-2">
           {readOnly ? (
             canStartNext && <button onClick={onStartNext} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-xs font-bold text-white glow-brand">⚡ Start Season {detail.event.season + 1}</button>
+          ) : isQualifying ? (
+            <>
+              <button onClick={async () => { await deleteEvent(detail.event.id); await store.refresh(); onBack() }} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-500 hover:text-loss">Discard</button>
+              <button onClick={onFormDivisions} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-xs font-bold text-white glow-brand">Form divisions →</button>
+            </>
           ) : (
             <>
               <button onClick={async () => { await deleteEvent(detail.event.id); await store.refresh(); onBack() }} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-500 hover:text-loss">Discard</button>
@@ -382,8 +603,19 @@ function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecord
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        {detail.leagues.map((l) => (
-          <LeagueCard key={l.id} league={l} matches={detail.matches} readOnly={readOnly} prevRecords={prevRecords} store={store} onSelect={onSelect} onChanged={onChanged} />
+        {leagues.map((l) => (
+          <LeagueCard
+            key={l.id}
+            league={l}
+            matches={matches}
+            readOnly={readOnly}
+            locked={validated[l.id] != null}
+            isGroup={isQualifying}
+            prevRecords={prevRecords}
+            prevTiers={prevTiers}
+            onSelect={onSelect}
+            onOpen={() => setActiveId(l.id)}
+          />
         ))}
       </div>
 
@@ -393,7 +625,10 @@ function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecord
         <Modal onClose={() => setConfirmFinish(false)}>
           <div className="px-5 py-5">
             <h3 className="text-lg font-bold">Finish this season?</h3>
-            <p className="mt-1 text-sm text-ink-500">Ratings are saved after each match. Finishing keeps the season viewable in the hub, and lets you start the next one (re-seeded by wins).</p>
+            <p className="mt-1 text-sm text-ink-500">
+              Ratings are saved after each match. Finishing keeps the season viewable and lets you start the next one — the winner of each division goes up, the last goes down.
+              {openGroups > 0 && <span className="mt-2 block font-semibold text-brand-400">{openGroups} group{openGroups === 1 ? '' : 's'} not validated yet — you can still finish.</span>}
+            </p>
           </div>
           <div className="flex gap-2 border-t hairline px-5 py-4">
             <button onClick={() => setConfirmFinish(false)} className="glass-soft tap flex-1 rounded-xl py-2.5 text-sm font-semibold text-ink-300">Keep open</button>
@@ -405,10 +640,9 @@ function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecord
   )
 }
 
-function LeagueCard({ league, matches, readOnly, prevRecords, store, onSelect, onChanged }: {
-  league: LeagueWithPlayers; matches: Match[]; readOnly: boolean; prevRecords?: Map<string, WL> | null; store: Store; onSelect: (id: string) => void; onChanged: () => void
+function LeagueCard({ league, matches, readOnly, locked, isGroup, prevRecords, prevTiers, onSelect, onOpen }: {
+  league: LeagueWithPlayers; matches: Match[]; readOnly: boolean; locked: boolean; isGroup: boolean; prevRecords?: Map<string, WL> | null; prevTiers?: Map<string, number> | null; onSelect: (id: string) => void; onOpen: () => void
 }) {
-  const [openKey, setOpenKey] = useState<string | null>(null)
   const fx = fixtures(league)
   const played = fx.filter((f) => findMatch(matches, f[0].id, f[1].id)).length
   const standings = computeStandings(league, matches)
@@ -420,6 +654,7 @@ function LeagueCard({ league, matches, readOnly, prevRecords, store, onSelect, o
           <span className="h-2.5 w-2.5 rounded-full" style={{ background: league.color, boxShadow: `0 0 12px ${league.color}` }} />
           <span className="font-bold">{league.name}</span>
           <span className="text-[11px] text-ink-500">{league.format}</span>
+          {locked && <span className="rounded bg-win/15 px-1.5 py-px text-[9px] font-bold uppercase text-win">✓ locked</span>}
         </div>
         <span className="text-xs font-semibold text-ink-500">{played}/{fx.length}</span>
       </div>
@@ -434,115 +669,37 @@ function LeagueCard({ league, matches, readOnly, prevRecords, store, onSelect, o
             <span className="flex min-w-0 items-center gap-2">
               <Avatar name={s.player.name} size={22} />
               <span className="min-w-0 leading-tight">
-                <span className="block truncate font-semibold">{s.player.name}</span>
+                <span className="flex items-center gap-1 truncate font-semibold">{s.player.name} <TieChip reason={s.reason} /></span>
                 {prevRecords && (
-                  <span className="block text-[10px] text-ink-500">last: {prevRecords.has(s.player.id) ? `${prevRecords.get(s.player.id)!.wins}-${prevRecords.get(s.player.id)!.losses}` : 'new'}</span>
+                  <span className="flex items-center gap-1 text-[10px] text-ink-500">
+                    <MovementChip tier={league.tier} prevTier={prevTiers?.get(s.player.id)} known={!!prevTiers} />
+                    last: {prevRecords.has(s.player.id) ? `${prevRecords.get(s.player.id)!.wins}-${prevRecords.get(s.player.id)!.losses}` : 'new'}
+                  </span>
                 )}
               </span>
             </span>
             <span className="text-center font-mono text-xs text-ink-500">{s.played}</span>
             <span className="text-center font-mono text-xs text-win">{s.wins}</span>
-            <span className="text-right font-mono text-xs" style={{ color: s.diff > 0 ? '#34d399' : s.diff < 0 ? '#fb6f7d' : '#7c8696' }}>{s.diff > 0 ? '+' : ''}{s.diff}</span>
+            <span className="text-right font-mono text-xs" style={{ color: s.pointDiff > 0 ? '#34d399' : s.pointDiff < 0 ? '#fb6f7d' : '#7c8696' }}>{s.pointDiff > 0 ? '+' : ''}{s.pointDiff}</span>
           </button>
         ))}
       </div>
 
-      <div className="border-t hairline px-2 py-2">
-        <div className="mb-1 px-2 text-[10px] font-semibold uppercase tracking-wide text-ink-500">Fixtures</div>
-        <div className="space-y-1">
-          {fx.map((f) => {
-            const m = findMatch(matches, f[0].id, f[1].id)
-            const key = `${f[0].id}:${f[1].id}`
-            return (
-              <FixtureRow key={key} a={f[0]} b={f[1]} match={m} readOnly={readOnly} open={openKey === key} onToggle={() => setOpenKey(openKey === key ? null : key)} format={league.format} leagueId={league.id} eventId={league.eventId} store={store} onDone={() => { setOpenKey(null); onChanged() }} />
-            )
-          })}
-        </div>
+      <div className="border-t hairline p-2">
+        <button onClick={onOpen} className="tap flex w-full items-center justify-center gap-2 rounded-xl bg-white/[0.06] py-2.5 text-xs font-bold text-ink-200 hover:bg-white/10">
+          {readOnly ? `View ${isGroup ? 'group' : 'results'}` : played < fx.length ? `Enter results · ${played}/${fx.length}` : 'Review results'} →
+        </button>
       </div>
     </div>
   )
 }
 
-function FixtureRow({ a, b, match, readOnly, open, onToggle, format, leagueId, eventId, store, onDone }: {
-  a: Player; b: Player; match?: Match; readOnly: boolean; open: boolean; onToggle: () => void; format: string; leagueId: string; eventId: string; store: Store; onDone: () => void
-}) {
-  const [sa, setSa] = useState(11)
-  const [sb, setSb] = useState(7)
-  const [busy, setBusy] = useState(false)
-
-  if (match) {
-    const aWon = match.winnerId === a.id
-    const aScore = match.playerAId === a.id ? match.scoreA : match.scoreB
-    const bScore = match.playerAId === a.id ? match.scoreB : match.scoreA
-    return (
-      <div className="flex items-center gap-2 rounded-xl bg-white/[0.04] px-3 py-2 text-sm">
-        <span className={`flex-1 truncate text-right ${aWon ? 'font-bold' : 'text-ink-500'}`}>{a.name}</span>
-        <span className="font-mono font-bold">{aScore}</span><span className="text-ink-600">:</span><span className="font-mono font-bold">{bScore}</span>
-        <span className={`flex-1 truncate ${!aWon ? 'font-bold' : 'text-ink-500'}`}>{b.name}</span>
-        <span className="text-win">✓</span>
-      </div>
-    )
-  }
-
-  if (readOnly) {
-    return (
-      <div className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm text-ink-500">
-        <span className="flex-1 truncate text-right">{a.name}</span>
-        <span className="rounded-md bg-white/5 px-2 py-0.5 text-[11px]">vs</span>
-        <span className="flex-1 truncate">{b.name}</span>
-        <span className="text-[10px] uppercase">unplayed</span>
-      </div>
-    )
-  }
-
-  if (!open) {
-    return (
-      <button onClick={onToggle} className="tap flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-white/5">
-        <span className="flex-1 truncate text-right">{a.name}</span>
-        <span className="rounded-md bg-white/8 px-2 py-0.5 text-[11px] font-semibold text-ink-300">vs</span>
-        <span className="flex-1 truncate">{b.name}</span>
-        <span className="text-[11px] font-semibold text-brand-400">enter</span>
-      </button>
-    )
-  }
-
-  const tie = sa === sb
-  async function save() {
-    if (tie) return
-    setBusy(true)
-    try {
-      const aWon = sa > sb
-      await store.recordMatch({ winnerId: aWon ? a.id : b.id, loserId: aWon ? b.id : a.id, winnerScore: Math.max(sa, sb), loserScore: Math.min(sa, sb), format, eventId, leagueId })
-      onDone()
-    } finally { setBusy(false) }
-  }
-
-  return (
-    <div className="animate-pop rounded-2xl bg-white/[0.05] p-3 ring-1 ring-brand/30">
-      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-        <div className="truncate text-right text-sm font-semibold">{a.name}</div>
-        <div className="text-[11px] text-ink-500">{format}</div>
-        <div className="truncate text-sm font-semibold">{b.name}</div>
-      </div>
-      <div className="mt-2 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-        <Score value={sa} set={setSa} /><span className="text-ink-600">:</span><Score value={sb} set={setSb} />
-      </div>
-      <div className="mt-2 flex gap-2">
-        <button onClick={onToggle} className="glass-soft tap flex-1 rounded-xl py-2 text-xs font-semibold text-ink-300">Cancel</button>
-        <button onClick={save} disabled={busy || tie} className="tap flex-1 rounded-xl bg-gradient-to-br from-brand to-brand2 py-2 text-xs font-bold text-white glow-brand disabled:opacity-40 disabled:shadow-none">{busy ? 'Saving…' : 'Save result'}</button>
-      </div>
-    </div>
-  )
-}
-
-function Score({ value, set }: { value: number; set: (v: number) => void }) {
-  return (
-    <div className="flex items-center justify-center gap-1.5">
-      <button onClick={() => set(Math.max(0, value - 1))} className="tap grid h-9 w-9 place-items-center rounded-xl bg-white/8 text-lg font-bold text-ink-400 hover:text-white">−</button>
-      <span className="w-9 text-center font-mono text-2xl font-extrabold tabular-nums">{value}</span>
-      <button onClick={() => set(value + 1)} className="tap grid h-9 w-9 place-items-center rounded-xl bg-white/8 text-lg font-bold text-ink-400 hover:text-white">+</button>
-    </div>
-  )
+function MovementChip({ tier, prevTier, known }: { tier: number; prevTier?: number; known: boolean }) {
+  if (!known) return null
+  if (prevTier == null) return <span className="font-bold text-brand-400">●</span> // new to the league this season
+  if (prevTier > tier) return <span className="font-bold text-win" title={`Promoted from division ${prevTier}`}>▲</span>
+  if (prevTier < tier) return <span className="font-bold text-loss" title={`Relegated from division ${prevTier}`}>▼</span>
+  return <span className="text-ink-600" title="Stayed">–</span>
 }
 
 // ───────────────────────── helpers ─────────────────────────
@@ -558,23 +715,13 @@ function findMatch(matches: Match[], aId: string, bId: string): Match | undefine
   return matches.find((m) => (m.playerAId === aId && m.playerBId === bId) || (m.playerAId === bId && m.playerBId === aId))
 }
 
-interface Standing { player: Player; played: number; wins: number; diff: number }
-function computeStandings(league: LeagueWithPlayers, matches: Match[]): Standing[] {
-  const ids = new Set(league.players.map((p) => p.id))
-  const lm = matches.filter((m) => ids.has(m.playerAId) && ids.has(m.playerBId))
-  const rows: Standing[] = league.players.map((player) => {
-    let played = 0, wins = 0, diff = 0
-    for (const m of lm) {
-      if (m.playerAId !== player.id && m.playerBId !== player.id) continue
-      played++
-      const mine = m.playerAId === player.id ? m.scoreA : m.scoreB
-      const theirs = m.playerAId === player.id ? m.scoreB : m.scoreA
-      diff += mine - theirs
-      if (m.winnerId === player.id) wins++
-    }
-    return { player, played, wins, diff }
-  })
-  return rows.sort((a, b) => b.wins - a.wins || b.diff - a.diff || b.player.elo - a.player.elo)
+function computeStandings(league: LeagueWithPlayers, matches: Match[]): RankedPlayer[] {
+  return rankDivision(league.players, matches, { multiSet: parseFormat(league.format).sets > 1 })
+}
+
+function ordinal(n: number): string {
+  const s = ['th', 'st', 'nd', 'rd'], v = n % 100
+  return n + (s[(v - 20) % 10] ?? s[v] ?? s[0])
 }
 
 // ───────────────────────── small UI ─────────────────────────
@@ -595,6 +742,41 @@ function Seg<T extends string>({ value, onChange, options }: { value: T; onChang
       {options.map(([v, label]) => (
         <button key={v} onClick={() => onChange(v)} className={`tap rounded-lg px-3 py-1.5 text-xs font-bold transition ${value === v ? 'bg-white/12 text-white' : 'text-ink-500 hover:text-ink-300'}`}>{label}</button>
       ))}
+    </div>
+  )
+}
+
+function FormatControl({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const { sets, pointsTo } = parseFormat(value)
+  const build = (s: number, p: number) => (s === 1 ? `1 set to ${p}` : `Best of ${s} to ${p}`)
+  return (
+    <div className="glass-soft flex items-center gap-2 rounded-xl px-2.5 py-1">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-500">Format</span>
+      <Seg value={String(sets)} onChange={(v) => onChange(build(+v, pointsTo))} options={[['1', 'Single'], ['3', 'Bo3'], ['5', 'Bo5']]} />
+      <Seg value={String(pointsTo)} onChange={(v) => onChange(build(sets, +v))} options={[['11', '11'], ['21', '21']]} />
+    </div>
+  )
+}
+
+function MiniStep({ value, min, max, onChange }: { value: number; min: number; max: number; onChange: (v: number) => void }) {
+  const clamp = (v: number) => Math.max(min, Math.min(max, v))
+  return (
+    <div className="flex items-center gap-1">
+      <button onClick={() => onChange(clamp(value - 1))} className="tap grid h-6 w-6 place-items-center rounded-lg bg-white/8 font-bold text-ink-400 hover:text-white">−</button>
+      <span className="w-4 text-center font-mono text-sm font-bold tabular-nums">{value}</span>
+      <button onClick={() => onChange(clamp(value + 1))} className="tap grid h-6 w-6 place-items-center rounded-lg bg-white/8 font-bold text-ink-400 hover:text-white">+</button>
+    </div>
+  )
+}
+
+function PromoteControl({ cfg, onChange }: { cfg: PromotionConfig; onChange: (c: PromotionConfig) => void }) {
+  return (
+    <div className="glass-soft flex items-center gap-2.5 rounded-xl px-3 py-1.5" title="How many move up / down per division boundary">
+      <span className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-win">↑ Up</span>
+      <MiniStep value={cfg.up} min={0} max={4} onChange={(v) => onChange({ ...cfg, up: v })} />
+      <span className="h-4 w-px bg-white/10" />
+      <span className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-loss">↓ Down</span>
+      <MiniStep value={cfg.down} min={0} max={4} onChange={(v) => onChange({ ...cfg, down: v })} />
     </div>
   )
 }

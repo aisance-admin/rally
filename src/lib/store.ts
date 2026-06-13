@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AppData } from '../types'
 import * as api from './api'
-import type { PlayerInput, RecordMatchInput } from './api'
+import type { Backup, MatchOpResult, PlayerInput, RecordMatchInput } from './api'
 import { supabaseReady } from './supabase'
 
 const EMPTY: AppData = { players: [], divisions: [], matches: [], events: [], seeded: false }
@@ -20,7 +20,11 @@ export interface Store extends AppData {
     patch: Partial<{ name: string; handle: string; country: string; elo: number }>,
   ) => Promise<void>
   deletePlayer: (id: string) => Promise<void>
-  recordMatch: (input: RecordMatchInput) => Promise<void>
+  recordMatch: (input: RecordMatchInput) => Promise<MatchOpResult>
+  deleteMatch: (matchId: string) => Promise<MatchOpResult>
+  validateLeague: (leagueId: string, on: boolean) => Promise<void>
+  exportData: () => Promise<Backup>
+  importData: (backup: Backup) => Promise<void>
 }
 
 export function useStore(): Store {
@@ -33,6 +37,7 @@ export function useStore(): Store {
   const refresh = useCallback(async () => {
     try {
       const d = await api.fetchAll()
+      latest.current = d
       setData(d)
       setError(null)
     } catch (e: any) {
@@ -41,6 +46,24 @@ export function useStore(): Store {
       setLoading(false)
     }
   }, [])
+
+  // Patch matches + players in place from a match op — no full refetch (keeps scroll/standings live).
+  const applyOp = (res: MatchOpResult) => {
+    const d = latest.current
+    let matches = d.matches
+    if (res.removedId) matches = matches.filter((m) => m.id !== res.removedId)
+    if (res.match) matches = [res.match, ...matches.filter((m) => m.id !== res.match!.id)]
+    const pmap = new Map(res.patches.map((p) => [p.id, p]))
+    const players = pmap.size
+      ? d.players.map((p) => {
+          const pt = pmap.get(p.id)
+          return pt ? { ...p, elo: pt.elo, peakElo: pt.peakElo, wins: pt.wins, losses: pt.losses, form: pt.form, history: pt.history, divisionId: pt.divisionId } : p
+        })
+      : d.players
+    const next = { ...d, matches, players }
+    latest.current = next
+    setData(next)
+  }
 
   useEffect(() => {
     if (!supabaseReady) {
@@ -84,10 +107,25 @@ export function useStore(): Store {
       await refresh()
     },
     recordMatch: async (input) => {
-      await api.recordMatch(input, latest.current.players)
+      const res = await api.recordMatch(input, latest.current.players, latest.current.matches)
+      applyOp(res)
+      return res
+    },
+    deleteMatch: async (matchId) => {
+      const res = await api.deleteMatch(matchId, latest.current.players, latest.current.matches)
+      applyOp(res)
+      return res
+    },
+    validateLeague: async (leagueId, on) => {
+      await api.validateLeague(leagueId, on)
+    },
+    exportData: () => api.exportAll(),
+    importData: async (backup) => {
+      await api.importAll(backup)
       await refresh()
     },
   }
 }
 
 export type { RecordMatchInput }
+export type { Backup } from './api'

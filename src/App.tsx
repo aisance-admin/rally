@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useStore } from './lib/store'
 import { Leaderboard } from './components/Leaderboard'
 import { MatchesFeed } from './components/MatchesFeed'
@@ -22,10 +22,12 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [importFile, setImportFile] = useState<File | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
 
   const selected = store.players.find((p) => p.id === selectedId) ?? null
   const isEmpty = store.players.length === 0
-  const liveEvent = store.events.find((e) => e.status === 'live')
+  const liveEvent = store.events.find((e) => e.status === 'live' || e.status === 'qualifying')
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true)
@@ -35,6 +37,25 @@ export default function App() {
       setBusy(false)
     }
   }
+
+  const doExport = () =>
+    run(async () => {
+      const backup = await store.exportData()
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `rally-backup-${backup.exportedAt.slice(0, 10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    })
+
+  const doImport = (file: File) =>
+    run(async () => {
+      const backup = JSON.parse(await file.text())
+      await store.importData(backup)
+      setImportFile(null)
+    })
 
   if (store.loading) {
     return (
@@ -86,6 +107,29 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-2">
+              <input
+                ref={fileRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) setImportFile(f); e.target.value = '' }}
+              />
+              <button
+                onClick={doExport}
+                disabled={isEmpty || busy}
+                className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white disabled:opacity-30"
+                title="Download a full JSON backup"
+              >
+                ⬇ Backup
+              </button>
+              <button
+                onClick={() => fileRef.current?.click()}
+                disabled={busy}
+                className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white disabled:opacity-30"
+                title="Restore from a JSON backup (replaces all data)"
+              >
+                ⬆
+              </button>
               <button
                 onClick={() => run(store.reseedMock)}
                 disabled={busy}
@@ -145,6 +189,20 @@ export default function App() {
 
       {selected && (
         <PlayerModal player={selected} players={store.players} divisions={store.divisions} matches={store.matches} onClose={() => setSelectedId(null)} onSelect={setSelectedId} />
+      )}
+
+      {importFile && (
+        <Modal onClose={() => setImportFile(null)}>
+          <div className="px-5 py-5">
+            <div className="text-3xl">⬆</div>
+            <h3 className="mt-2 text-lg font-bold">Restore this backup?</h3>
+            <p className="mt-1 text-sm text-ink-500">Importing <span className="font-semibold text-ink-300">{importFile.name}</span> replaces all current players, matches, and leagues with the contents of the file.</p>
+          </div>
+          <div className="flex gap-2 border-t hairline px-5 py-4">
+            <button onClick={() => setImportFile(null)} className="glass-soft tap flex-1 rounded-xl py-2.5 text-sm font-semibold text-ink-300 hover:text-white">Cancel</button>
+            <button onClick={() => importFile && doImport(importFile)} disabled={busy} className="tap flex-1 rounded-xl bg-gradient-to-br from-brand to-brand2 py-2.5 text-sm font-bold text-white glow-brand disabled:opacity-50">{busy ? 'Restoring…' : 'Restore backup'}</button>
+          </div>
+        </Modal>
       )}
 
       {confirmClear && (

@@ -10,13 +10,24 @@ export function maxLeaguesFor(activePlayers: number): number {
   return Math.max(1, Math.floor(activePlayers / 2))
 }
 
+export type FormationMode = 'elo' | 'random' | 'manual'
+
 /** First-season layout: split checked-in players into `numLeagues` divisions,
- *  either by rating (strongest in Elite) or randomly. Admin can edit afterwards. */
+ *  by rating (strongest first), randomly, or manually (empty divisions to fill
+ *  by hand). Admin can always edit afterwards on the draft screen. */
 export function buildInitialDivisions(
   players: Player[],
   numLeagues: number,
-  mode: 'elo' | 'random',
+  mode: FormationMode,
 ): DraftDivision[] {
+  // Manual: hand the admin empty divisions; everyone starts on the bench.
+  if (mode === 'manual') {
+    return Array.from({ length: Math.max(1, numLeagues) }, (_, i) => ({
+      name: LEAGUE_NAMES[i] ?? `League ${i + 1}`,
+      color: LEAGUE_COLORS[i] ?? '#9aa4b2',
+      players: [] as Player[],
+    }))
+  }
   let ordered: Player[]
   if (mode === 'elo') {
     ordered = [...players].sort((a, b) => b.elo - a.elo)
@@ -132,97 +143,238 @@ export function seasonRecordsFor(detail: EventDetail): Map<string, WL> {
   return rec
 }
 
-/** Final standings order (best first) within a league, by wins → game diff → ELO. */
-export function standingsOrder(league: LeagueWithPlayers, matches: Match[]): Player[] {
-  const ids = new Set(league.players.map((p) => p.id))
-  const lm = matches.filter((m) => ids.has(m.playerAId) && ids.has(m.playerBId))
-  const score = new Map<string, { wins: number; diff: number }>()
-  for (const p of league.players) score.set(p.id, { wins: 0, diff: 0 })
+// ───────────────────────── ranking / tie-break engine (spec §2) ─────────────────────────
+
+export type TieReason =
+  | null
+  | 'H2H' // head-to-head decided it
+  | 'mini-wins' // wins within the tied group
+  | 'mini-sets' // set diff within the tied group (best-of-N)
+  | 'mini-pts' // point balance within the tied group → "pts (H2H)"
+  | 'vs-out-sets' // set diff vs players outside the tie
+  | 'vs-out-pts' // point balance vs players outside the tie → "vs #N"
+  | 'needs-pts' // tied; can't resolve without real scores (win/loss entry) → prompt for points
+  | 'draw' // random draw — total equality
+
+export interface RankOpts {
+  multiSet?: boolean
+  seed?: number
+}
+
+export interface RankedPlayer {
+  player: Player
+  played: number
+  wins: number
+  pointDiff: number
+  setDiff: number
+  reason: TieReason
+}
+
+/** Match format → number of sets and points-per-set. "Best of 3 to 11" → {3,11}. */
+export function parseFormat(format: string): { sets: number; pointsTo: number } {
+  const f = (format ?? '').toLowerCase()
+  const bo = f.match(/best of (\d+)/) ?? f.match(/bo\s*(\d+)/)
+  const pts = f.match(/to (\d+)/)
+  return { sets: bo ? parseInt(bo[1], 10) : 1, pointsTo: pts ? parseInt(pts[1], 10) : 11 }
+}
+
+function hash(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+/** Set difference toward player A (+ if A leads). Single-set falls back to ±1 by winner. */
+function setDiffOf(m: Match): number {
+  if (m.sets && m.sets.length) return m.sets.reduce((s, st) => s + (st.a > st.b ? 1 : st.b > st.a ? -1 : 0), 0)
+  return m.winnerId === m.playerAId ? 1 : -1
+}
+
+/**
+ * Rank players within ONE division using the head-to-head cascade (spec §2).
+ * Primary = matches won. Ties resolved by: A) head-to-head, B) mini-table among
+ * the tied players (wins, then sets [best-of-N], then point balance), C) results
+ * vs players outside the tie, D) re-apply, E) random draw. Point-based steps need
+ * real scores; when matches are win/loss-only a tie is flagged 'needs-pts'.
+ */
+export function rankDivision(players: Player[], matches: Match[], opts: RankOpts = {}): RankedPlayer[] {
+  const ids = new Set(players.map((p) => p.id))
+  const lm = matches.filter((m) => m.winnerId && ids.has(m.playerAId) && ids.has(m.playerBId))
+
+  const stat = new Map<string, { played: number; wins: number; pts: number; sets: number }>()
+  for (const p of players) stat.set(p.id, { played: 0, wins: 0, pts: 0, sets: 0 })
   for (const m of lm) {
-    const a = score.get(m.playerAId)!
-    const b = score.get(m.playerBId)!
-    a.diff += m.scoreA - m.scoreB
-    b.diff += m.scoreB - m.scoreA
+    const a = stat.get(m.playerAId)!
+    const b = stat.get(m.playerBId)!
+    a.played++; b.played++
+    a.pts += m.scoreA - m.scoreB; b.pts += m.scoreB - m.scoreA
+    const sd = setDiffOf(m)
+    a.sets += sd; b.sets -= sd
     if (m.winnerId === m.playerAId) a.wins++
     else if (m.winnerId === m.playerBId) b.wins++
   }
-  return [...league.players].sort((p, q) => {
-    const sp = score.get(p.id)!
-    const sq = score.get(q.id)!
-    return sq.wins - sp.wins || sq.diff - sp.diff || q.elo - p.elo
+
+  const between = (x: string, y: string) =>
+    lm.filter((m) => (m.playerAId === x && m.playerBId === y) || (m.playerAId === y && m.playerBId === x))
+  const winsAmong = (pid: string, grp: Player[]) => {
+    let w = 0
+    for (const q of grp) if (q.id !== pid) for (const m of between(pid, q.id)) if (m.winnerId === pid) w++
+    return w
+  }
+  const ptsVs = (pid: string, against: Player[]) => {
+    let d = 0
+    for (const q of against) if (q.id !== pid) for (const m of between(pid, q.id)) d += m.playerAId === pid ? m.scoreA - m.scoreB : m.scoreB - m.scoreA
+    return d
+  }
+  const setsVs = (pid: string, against: Player[]) => {
+    let d = 0
+    for (const q of against) if (q.id !== pid) for (const m of between(pid, q.id)) { const sd = setDiffOf(m); d += m.playerAId === pid ? sd : -sd }
+    return d
+  }
+  const allFinalAmong = (grp: Player[]) => {
+    for (let i = 0; i < grp.length; i++)
+      for (let j = i + 1; j < grp.length; j++)
+        if (between(grp[i].id, grp[j].id).some((m) => m.status !== 'final')) return false
+    return true
+  }
+
+  const partition = (group: Player[], metric: (p: Player) => number): Player[][] => {
+    const byVal = new Map<number, Player[]>()
+    for (const p of group) {
+      const v = metric(p)
+      const arr = byVal.get(v) ?? []
+      arr.push(p)
+      byVal.set(v, arr)
+    }
+    return [...byVal.keys()].sort((a, b) => b - a).map((v) => byVal.get(v)!)
+  }
+
+  function breakTie(group: Player[]): { player: Player; reason: TieReason }[] {
+    if (group.length === 1) return [{ player: group[0], reason: null }]
+    const outside = players.filter((p) => !group.includes(p))
+
+    const trySplit = (metric: (p: Player) => number, reason: TieReason) => {
+      const buckets = partition(group, metric)
+      if (buckets.length <= 1) return null
+      const out: { player: Player; reason: TieReason }[] = []
+      for (const b of buckets) {
+        if (b.length === 1) out.push({ player: b[0], reason })
+        else out.push(...breakTie(b).map((r) => ({ player: r.player, reason: r.reason ?? reason })))
+      }
+      return out
+    }
+
+    let r = trySplit((p) => winsAmong(p.id, group), group.length === 2 ? 'H2H' : 'mini-wins')
+    if (r) return r
+    if (opts.multiSet) { r = trySplit((p) => setsVs(p.id, group), 'mini-sets'); if (r) return r }
+    if (!allFinalAmong(group)) return [...group].sort((a, b) => b.elo - a.elo).map((p) => ({ player: p, reason: 'needs-pts' as TieReason }))
+    r = trySplit((p) => ptsVs(p.id, group), 'mini-pts'); if (r) return r
+    if (opts.multiSet) { r = trySplit((p) => setsVs(p.id, outside), 'vs-out-sets'); if (r) return r }
+    r = trySplit((p) => ptsVs(p.id, outside), 'vs-out-pts'); if (r) return r
+    return [...group]
+      .sort((a, b) => hash(`${opts.seed ?? 0}:${a.id}`) - hash(`${opts.seed ?? 0}:${b.id}`))
+      .map((p) => ({ player: p, reason: 'draw' as TieReason }))
+  }
+
+  const ordered: { player: Player; reason: TieReason }[] = []
+  for (const bucket of partition(players, (p) => stat.get(p.id)!.wins)) {
+    if (bucket.length === 1) ordered.push({ player: bucket[0], reason: null })
+    else ordered.push(...breakTie(bucket))
+  }
+  return ordered.map((o) => {
+    const s = stat.get(o.player.id)!
+    return { player: o.player, played: s.played, wins: s.wins, pointDiff: s.pts, setDiff: s.sets, reason: o.reason }
   })
 }
 
-/** Promotion/relegation: top N of each division move up, bottom N move down,
- *  based on the previous standings order (best-first per division). */
-export function applyPromoteRelegate(orig: Player[][], n: number): Player[][] {
-  const last = orig.length - 1
-  const promoted: Player[][] = orig.map(() => [])
-  const relegated: Player[][] = orig.map(() => [])
-  const stayers: Player[][] = orig.map(() => [])
+/** Final standings order (best first) within a league via the tie-break engine. */
+export function standingsOrder(league: LeagueWithPlayers, matches: Match[]): Player[] {
+  return rankDivision(league.players, matches, { multiSet: parseFormat(league.format).sets > 1, seed: hash(league.id) }).map((r) => r.player)
+}
 
-  orig.forEach((div, i) => {
-    let up = i === 0 ? 0 : n
-    let down = i === last ? 0 : n
+export interface PromotionConfig {
+  up: number
+  down: number
+  overrides?: Record<number, { up?: number; down?: number }>
+}
+export const DEFAULT_PROMOTION: PromotionConfig = { up: 1, down: 1 }
+
+function movements(orig: Player[][], cfg: PromotionConfig) {
+  const last = orig.length - 1
+  return orig.map((div, i) => {
+    const o = cfg.overrides?.[i]
+    let up = i === 0 ? 0 : Math.max(0, o?.up ?? cfg.up)
+    let down = i === last ? 0 : Math.max(0, o?.down ?? cfg.down)
     if (up + down > div.length) {
       down = Math.max(0, Math.min(down, div.length))
       up = Math.max(0, div.length - down)
     }
-    promoted[i] = div.slice(0, up)
-    relegated[i] = div.slice(div.length - down)
-    stayers[i] = div.slice(up, div.length - down)
-  })
-
-  return orig.map((_, i) => {
-    const fromAbove = i > 0 ? relegated[i - 1] : []
-    const fromBelow = i < last ? promoted[i + 1] : []
-    return [...fromAbove, ...stayers[i], ...fromBelow]
+    return { up, down }
   })
 }
 
-/** Global ranking of a season's players by wins → game difference → rating. */
-export function globalSeasonRanking(prev: EventDetail): Player[] {
-  const players: Player[] = []
-  for (const l of prev.leagues) for (const p of l.players) players.push(p)
-  const stat = new Map<string, { wins: number; diff: number }>()
-  for (const p of players) stat.set(p.id, { wins: 0, diff: 0 })
-  for (const m of prev.matches) {
-    const a = stat.get(m.playerAId)
-    const b = stat.get(m.playerBId)
-    if (a) {
-      a.diff += m.scoreA - m.scoreB
-      if (m.winnerId === m.playerAId) a.wins++
-    }
-    if (b) {
-      b.diff += m.scoreB - m.scoreA
-      if (m.winnerId === m.playerBId) b.wins++
-    }
-  }
-  return [...players].sort((p, q) => {
-    const sp = stat.get(p.id)!
-    const sq = stat.get(q.id)!
-    return sq.wins - sp.wins || sq.diff - sp.diff || q.elo - p.elo
-  })
+/** Persistent promotion/relegation (spec §7): the top `up` of each division move
+ *  up one, the bottom `down` move down one (configurable, per-division overrides).
+ *  The top division never promotes out; the bottom never relegates out. Middle
+ *  players stay — divisions keep their identity. NO global reshuffle. */
+export function applyPromoteRelegate(orig: Player[][], cfg: PromotionConfig): Player[][] {
+  const last = orig.length - 1
+  const mv = movements(orig, cfg)
+  const promoted = orig.map((div, i) => div.slice(0, mv[i].up))
+  const relegated = orig.map((div, i) => div.slice(div.length - mv[i].down))
+  const stayers = orig.map((div, i) => div.slice(mv[i].up, div.length - mv[i].down))
+  return orig.map((_, i) => [
+    ...(i > 0 ? relegated[i - 1] : []),
+    ...stayers[i],
+    ...(i < last ? promoted[i + 1] : []),
+  ])
 }
 
-/** Next-season layout: re-rank EVERY player by last season's wins and slot them
- *  top-down into the same number of divisions. Division 1 = most wins, so a 2-2
- *  player outranks a 0-0 player regardless of which division they were in. */
-export function computeNextSeasonDivisions(prev: EventDetail): DraftDivision[] {
-  const ranked = globalSeasonRanking(prev)
-  const numDiv = Math.max(1, prev.leagues.length)
-  const sizes = manualSizes(ranked.length, numDiv)
-  const divs: DraftDivision[] = []
-  let idx = 0
-  sizes.forEach((sz, i) => {
-    divs.push({
-      name: LEAGUE_NAMES[i] ?? `Division ${i + 1}`,
-      color: LEAGUE_COLORS[i] ?? '#9aa4b2',
-      players: ranked.slice(idx, idx + sz),
-    })
-    idx += sz
+/** Preview next-season division sizes under a rule; warn when sizes would drift. */
+export function previewDivisionSizes(
+  orig: Player[][],
+  cfg: PromotionConfig,
+): { before: number[]; after: number[]; drift: number[]; warning: string | null } {
+  const last = orig.length - 1
+  const mv = movements(orig, cfg)
+  const before = orig.map((d) => d.length)
+  const after = orig.map((div, i) => {
+    const inFromAbove = i > 0 ? mv[i - 1].down : 0
+    const inFromBelow = i < last ? mv[i + 1].up : 0
+    return div.length - mv[i].up - mv[i].down + inFromAbove + inFromBelow
   })
-  return divs
+  const drift = after.map((a, i) => a - before[i])
+  const warning = drift.some((d) => d !== 0)
+    ? `Uneven rule — sizes drift to ${after.join(' · ')}. Adjust by hand below if needed.`
+    : null
+  return { before, after, drift, warning }
+}
+
+/** Next-season divisions via persistent promotion/relegation (no global reshuffle):
+ *  rank each previous division with the tie-break engine, apply up/down moves,
+ *  keep each division's identity (name/color/order). */
+export function generateNextSeasonDivisions(
+  prev: EventDetail,
+  cfg: PromotionConfig = DEFAULT_PROMOTION,
+): DraftDivision[] {
+  const sorted = [...prev.leagues].sort((a, b) => a.tier - b.tier)
+  const orig = sorted.map((l) =>
+    rankDivision(l.players, prev.matches, { multiSet: parseFormat(l.format).sets > 1, seed: hash(l.id) }).map((r) => r.player),
+  )
+  const moved = applyPromoteRelegate(orig, cfg)
+  return moved.map((players, i) => ({
+    name: sorted[i]?.name ?? LEAGUE_NAMES[i] ?? `Division ${i + 1}`,
+    color: sorted[i]?.color ?? LEAGUE_COLORS[i] ?? '#9aa4b2',
+    players,
+  }))
+}
+
+export interface CreateSeasonOpts {
+  status?: string // 'live' (default) or 'qualifying' for a pre-season qualifier
+  format?: string // match format applied to every division; default '1 set to 11'
 }
 
 /** Persist a new season from an explicit (admin-adjusted) division layout. */
@@ -231,7 +383,10 @@ export async function createSeasonFromDivisions(
   seriesName: string,
   season: number,
   divisions: DraftDivision[],
+  opts: CreateSeasonOpts = {},
 ): Promise<string> {
+  const status = opts.status ?? 'live'
+  const format = opts.format ?? '1 set to 11'
   const { data: ev, error } = await supabase
     .from('rally_events')
     .insert({
@@ -239,8 +394,8 @@ export async function createSeasonFromDivisions(
       duration_min: season,
       tables: divisions.length,
       set_minutes: 0,
-      with_qualifier: false,
-      status: 'live',
+      with_qualifier: status === 'qualifying',
+      status,
     })
     .select()
     .single()
@@ -252,7 +407,7 @@ export async function createSeasonFromDivisions(
     name: d.name,
     tier: i + 1,
     color: d.color,
-    format: i === 0 ? 'Best of 3 to 11' : '1 set to 11',
+    format,
   }))
   const { data: leagueRows, error: lErr } = await supabase
     .from('rally_leagues')
@@ -274,4 +429,57 @@ export async function createSeasonFromDivisions(
     if (pErr) throw pErr
   }
   return eventId
+}
+
+// ───────────────────────── qualifier → divisions (spec §6) ─────────────────────────
+
+/** Default position→division mapping for `groups` qualifier groups of up to
+ *  `maxPos` players: 1st of every group → Division 1, 2nd → Division 2, … */
+export function defaultQualifierMapping(maxPos: number): Record<number, number> {
+  const m: Record<number, number> = {}
+  for (let pos = 1; pos <= maxPos; pos++) m[pos] = pos
+  return m
+}
+
+/** Build Season-1 divisions from finished qualifier groups using a
+ *  position→division rule: a player who finished `pos` in their group lands in
+ *  division `mapping[pos]`. Within a division, stronger qualifier finishes seed
+ *  higher. Divisions keep the standard names/colors. */
+export function buildDivisionsFromQualifier(
+  qual: EventDetail,
+  mapping: Record<number, number>,
+): DraftDivision[] {
+  const groups = [...qual.leagues].sort((a, b) => a.tier - b.tier)
+  // collect { player, division, pos } for everyone, ranking each group
+  const placed: { player: Player; div: number; pos: number; group: number }[] = []
+  groups.forEach((g, gi) => {
+    const ranked = rankDivision(g.players, qual.matches, { multiSet: parseFormat(g.format).sets > 1, seed: hash(g.id) })
+    ranked.forEach((r, idx) => {
+      const pos = idx + 1
+      const div = Math.max(1, mapping[pos] ?? pos)
+      placed.push({ player: r.player, div, pos, group: gi })
+    })
+  })
+  const maxDiv = placed.reduce((m, p) => Math.max(m, p.div), 1)
+  const out: DraftDivision[] = []
+  for (let d = 1; d <= maxDiv; d++) {
+    const members = placed
+      .filter((p) => p.div === d)
+      .sort((a, b) => a.pos - b.pos || a.group - b.group)
+      .map((p) => p.player)
+    out.push({
+      name: LEAGUE_NAMES[d - 1] ?? `Division ${d}`,
+      color: LEAGUE_COLORS[d - 1] ?? '#9aa4b2',
+      players: members,
+    })
+  }
+  return out.filter((d) => d.players.length > 0)
+}
+
+/** Map each player to the division tier they were in for a season — used to draw
+ *  promotion/relegation movement arrows between consecutive seasons. */
+export function tierByPlayer(detail: EventDetail): Map<string, number> {
+  const m = new Map<string, number>()
+  for (const l of detail.leagues) for (const p of l.players) m.set(p.id, l.tier)
+  return m
 }

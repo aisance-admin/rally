@@ -123,11 +123,13 @@ export function buildMockData(): AppData {
         playerBId: b.id,
         scoreA: aWins ? wScore : Math.min(lScore, 9),
         scoreB: aWins ? Math.min(lScore, 9) : wScore,
+        sets: null,
         winnerId: winner.id,
         eloDeltaWinner: res.winnerDelta,
         eloDeltaLoser: res.loserDelta,
         divisionId: div.id,
         format: formats[Math.floor(rng() * formats.length)],
+        status: 'final',
         playedAt: isoDaysAgo(round, Math.floor(rng() * 6)),
       })
     }

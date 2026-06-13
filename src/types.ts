@@ -25,17 +25,23 @@ export interface Division {
   eloFloor: number
 }
 
+export type SetScore = { a: number; b: number }
+/** 'final' = real points entered · 'wl' = win/loss only (1–0) · 'rank' = synthesized from a direct ranking */
+export type MatchStatus = 'final' | 'wl' | 'rank'
+
 export interface Match {
   id: ID
   playerAId: ID
   playerBId: ID
   scoreA: number
   scoreB: number
+  sets: SetScore[] | null // per-set points for best-of-N; null for single set / win-loss / rank
   winnerId: ID
   eloDeltaWinner: number
   eloDeltaLoser: number
   divisionId: ID
   format: string // e.g. "1 set to 11"
+  status: MatchStatus
   playedAt: string // ISO
 }
 
@@ -68,6 +74,7 @@ export interface League {
   tier: number
   color: string
   format: string
+  validatedAt: string | null // when the group was validated/locked; null = open
 }
 
 export interface LeagueWithPlayers extends League {

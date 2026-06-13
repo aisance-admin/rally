@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import type { AppData, Division, LeagueEvent, Match, Player } from '../types'
+import type { AppData, Division, LeagueEvent, Match, MatchStatus, Player, SetScore } from '../types'
 import { applyElo } from './elo'
 import { buildMockData, divisionForElo } from './mockData'
 import { parseSeriesName } from './seasons'
@@ -36,11 +36,13 @@ const toMatch = (r: Row): Match => ({
   playerBId: r.player_b,
   scoreA: r.score_a,
   scoreB: r.score_b,
+  sets: (r.sets ?? null) as Match['sets'],
   winnerId: r.winner_id,
   eloDeltaWinner: r.elo_delta_winner,
   eloDeltaLoser: r.elo_delta_loser,
   divisionId: r.division_id,
   format: r.format,
+  status: (r.status ?? 'final') as Match['status'],
   playedAt: r.played_at,
 })
 
@@ -155,63 +157,158 @@ export async function bulkCreatePlayers(names: string[], defaultElo = 1000): Pro
   return rows.length
 }
 
-// ---------- record a (casual) match ----------
+// ---------- record / edit / delete a match (with ELO reversal) ----------
 export interface RecordMatchInput {
+  matchId?: string | null // present = edit an existing row
   winnerId: string
   loserId: string
   winnerScore: number
   loserScore: number
+  sets?: SetScore[] | null
   format: string
+  status?: MatchStatus // default 'final'; 'wl' = win/loss only; 'rank' = synthesized, no ELO
   eventId?: string | null
   leagueId?: string | null
 }
 
-export async function recordMatch(input: RecordMatchInput, players: Player[]): Promise<void> {
-  const winner = players.find((p) => p.id === input.winnerId)
-  const loser = players.find((p) => p.id === input.loserId)
+/** Local-update payload returned so the UI can patch state without a full refetch. */
+export interface PlayerPatch {
+  id: string
+  elo: number
+  peakElo: number
+  wins: number
+  losses: number
+  form: ('W' | 'L')[]
+  history: number[]
+  divisionId: string
+}
+export interface MatchOpResult {
+  match?: Match
+  removedId?: string
+  patches: PlayerPatch[]
+}
+
+const formFromMatches = (pid: string, matches: Match[]): ('W' | 'L')[] =>
+  matches
+    .filter((m) => (m.playerAId === pid || m.playerBId === pid) && (m.status === 'final' || m.status === 'wl'))
+    .slice()
+    .sort((a, b) => +new Date(b.playedAt) - +new Date(a.playedAt))
+    .slice(0, 8)
+    .map((m) => (m.winnerId === pid ? 'W' : 'L'))
+
+async function writePlayer(p: PlayerPatch) {
+  const { error } = await supabase
+    .from('rally_players')
+    .update({ elo: p.elo, peak_elo: p.peakElo, wins: p.wins, losses: p.losses, form: p.form, history: p.history, division_id: p.divisionId })
+    .eq('id', p.id)
+  if (error) throw error
+}
+
+/** Record a new match OR edit an existing one. Reverses the old row's ELO/W-L first
+ *  (when editing), then applies the new result. 'rank' rows never touch ELO/players. */
+export async function recordMatch(input: RecordMatchInput, players: Player[], allMatches: Match[]): Promise<MatchOpResult> {
+  const status: MatchStatus = input.status ?? 'final'
+  const existing = input.matchId ? allMatches.find((m) => m.id === input.matchId) ?? null : null
+
+  // reverse the existing row's effect (in-memory) so the base is "as if it never happened"
+  let base = players.map((p) => ({ ...p }))
+  let matchesWithout = allMatches
+  if (existing) {
+    matchesWithout = allMatches.filter((m) => m.id !== existing.id)
+    if (existing.status !== 'rank') {
+      const loserId = existing.playerAId === existing.winnerId ? existing.playerBId : existing.playerAId
+      base = base.map((p) =>
+        p.id === existing.winnerId ? { ...p, elo: p.elo - existing.eloDeltaWinner, wins: Math.max(0, p.wins - 1) }
+        : p.id === loserId ? { ...p, elo: p.elo - existing.eloDeltaLoser, losses: Math.max(0, p.losses - 1) }
+        : p,
+      )
+    }
+  }
+
+  const winner = base.find((p) => p.id === input.winnerId)
+  const loser = base.find((p) => p.id === input.loserId)
   if (!winner || !loser) throw new Error('player not found')
-  const res = applyElo(winner.elo, loser.elo)
 
-  const wElo = res.newWinnerElo
-  const lElo = res.newLoserElo
+  const wScore = status === 'wl' || status === 'rank' ? 1 : Math.max(input.winnerScore, input.loserScore)
+  const lScore = status === 'wl' || status === 'rank' ? 0 : Math.min(input.winnerScore, input.loserScore)
+  let wDelta = 0, lDelta = 0, wElo = winner.elo, lElo = loser.elo
+  if (status !== 'rank') {
+    const res = applyElo(winner.elo, loser.elo)
+    wDelta = res.winnerDelta; lDelta = res.loserDelta; wElo = res.newWinnerElo; lElo = res.newLoserElo
+  }
 
-  await Promise.all([
-    supabase
-      .from('rally_players')
-      .update({
-        elo: wElo,
-        peak_elo: Math.max(winner.peakElo, wElo),
-        wins: winner.wins + 1,
-        form: ['W', ...winner.form].slice(0, 8),
-        history: [...winner.history, wElo].slice(-40),
-        division_id: divisionForElo(wElo),
-      })
-      .eq('id', winner.id),
-    supabase
-      .from('rally_players')
-      .update({
-        elo: lElo,
-        losses: loser.losses + 1,
-        form: ['L', ...loser.form].slice(0, 8),
-        history: [...loser.history, lElo].slice(-40),
-        division_id: divisionForElo(lElo),
-      })
-      .eq('id', loser.id),
-    supabase.from('rally_matches').insert({
-      event_id: input.eventId ?? null,
-      league_id: input.leagueId ?? null,
-      player_a: winner.id,
-      player_b: loser.id,
-      score_a: Math.max(input.winnerScore, input.loserScore),
-      score_b: Math.min(input.winnerScore, input.loserScore),
-      winner_id: winner.id,
-      elo_delta_winner: res.winnerDelta,
-      elo_delta_loser: res.loserDelta,
-      format: input.format,
-      division_id: winner.divisionId,
-      status: 'final',
-    }),
-  ])
+  const row = {
+    event_id: input.eventId ?? null,
+    league_id: input.leagueId ?? null,
+    player_a: winner.id,
+    player_b: loser.id,
+    score_a: wScore,
+    score_b: lScore,
+    sets: input.sets ?? null,
+    winner_id: winner.id,
+    elo_delta_winner: wDelta,
+    elo_delta_loser: lDelta,
+    format: input.format,
+    division_id: winner.divisionId,
+    status,
+  }
+
+  const q = existing
+    ? supabase.from('rally_matches').update(row).eq('id', existing.id).select().single()
+    : supabase.from('rally_matches').insert(row).select().single()
+  const { data, error } = await q
+  if (error) throw error
+  const match = toMatch(data)
+
+  const patches: PlayerPatch[] = []
+  const matchesNow = [...matchesWithout, match]
+  if (status !== 'rank') {
+    const wHist = [...winner.history, wElo].slice(-40)
+    const lHist = [...loser.history, lElo].slice(-40)
+    patches.push(
+      { id: winner.id, elo: wElo, peakElo: Math.max(winner.peakElo, wElo), wins: winner.wins + 1, losses: winner.losses, form: formFromMatches(winner.id, matchesNow), history: wHist, divisionId: divisionForElo(wElo) },
+      { id: loser.id, elo: lElo, peakElo: Math.max(loser.peakElo, lElo), wins: loser.wins, losses: loser.losses + 1, form: formFromMatches(loser.id, matchesNow), history: lHist, divisionId: divisionForElo(lElo) },
+    )
+  } else if (existing && existing.status !== 'rank') {
+    // editing a scored row down to 'rank' — persist the reversal only
+    for (const p of base) if (p.id === winner.id || p.id === loser.id)
+      patches.push({ id: p.id, elo: p.elo, peakElo: p.peakElo, wins: p.wins, losses: p.losses, form: formFromMatches(p.id, matchesNow), history: p.history, divisionId: divisionForElo(p.elo) })
+  }
+  await Promise.all(patches.map(writePlayer))
+  return { match, patches }
+}
+
+/** Delete a match, reversing its ELO/W-L effect on both players. */
+export async function deleteMatch(matchId: string, players: Player[], allMatches: Match[]): Promise<MatchOpResult> {
+  const existing = allMatches.find((m) => m.id === matchId)
+  if (!existing) return { removedId: matchId, patches: [] }
+  const matchesWithout = allMatches.filter((m) => m.id !== matchId)
+  const patches: PlayerPatch[] = []
+  if (existing.status !== 'rank') {
+    const loserId = existing.playerAId === existing.winnerId ? existing.playerBId : existing.playerAId
+    for (const p of players) {
+      if (p.id === existing.winnerId) {
+        const elo = p.elo - existing.eloDeltaWinner
+        patches.push({ id: p.id, elo, peakElo: p.peakElo, wins: Math.max(0, p.wins - 1), losses: p.losses, form: formFromMatches(p.id, matchesWithout), history: p.history, divisionId: divisionForElo(elo) })
+      } else if (p.id === loserId) {
+        const elo = p.elo - existing.eloDeltaLoser
+        patches.push({ id: p.id, elo, peakElo: p.peakElo, wins: p.wins, losses: Math.max(0, p.losses - 1), form: formFromMatches(p.id, matchesWithout), history: p.history, divisionId: divisionForElo(elo) })
+      }
+    }
+  }
+  const { error } = await supabase.from('rally_matches').delete().eq('id', matchId)
+  if (error) throw error
+  await Promise.all(patches.map(writePlayer))
+  return { removedId: matchId, patches }
+}
+
+/** Lock / unlock a division (group validation). */
+export async function validateLeague(leagueId: string, on: boolean): Promise<void> {
+  const { error } = await supabase
+    .from('rally_leagues')
+    .update({ validated_at: on ? new Date().toISOString() : null })
+    .eq('id', leagueId)
+  if (error) throw error
 }
 
 // ---------- mock data + wipe ----------
@@ -265,6 +362,70 @@ export async function seedMockRoster(): Promise<void> {
     const { error: mErr } = await supabase.from('rally_matches').insert(matchRows as Row[])
     if (mErr) throw mErr
   }
+}
+
+// ---------- full backup: export / import ----------
+export interface Backup {
+  rally: true
+  version: 1
+  exportedAt: string
+  tables: {
+    rally_divisions: Row[]
+    rally_players: Row[]
+    rally_events: Row[]
+    rally_leagues: Row[]
+    rally_event_participants: Row[]
+    rally_matches: Row[]
+  }
+}
+
+/** Read every RALLY table verbatim for a downloadable JSON backup. */
+export async function exportAll(): Promise<Backup> {
+  const [divisions, players, events, leagues, participants, matches] = await Promise.all([
+    supabase.from('rally_divisions').select('*'),
+    supabase.from('rally_players').select('*'),
+    supabase.from('rally_events').select('*'),
+    supabase.from('rally_leagues').select('*'),
+    supabase.from('rally_event_participants').select('*'),
+    supabase.from('rally_matches').select('*'),
+  ])
+  for (const r of [divisions, players, events, leagues, participants, matches]) if (r.error) throw r.error
+  return {
+    rally: true,
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    tables: {
+      rally_divisions: divisions.data ?? [],
+      rally_players: players.data ?? [],
+      rally_events: events.data ?? [],
+      rally_leagues: leagues.data ?? [],
+      rally_event_participants: participants.data ?? [],
+      rally_matches: matches.data ?? [],
+    },
+  }
+}
+
+/** Wipe everything and restore a backup verbatim (ids preserved), inserted in
+ *  FK-safe order. Parents before children. */
+export async function importAll(backup: Backup): Promise<void> {
+  if (!backup?.rally || !backup.tables) throw new Error('Not a RALLY backup file.')
+  await clearAll()
+  const t = backup.tables
+  const insert = async (table: string, rows: Row[]) => {
+    if (!rows?.length) return
+    const { error } = await supabase.from(table).insert(rows)
+    if (error) throw error
+  }
+  // divisions are kept by clearAll; upsert in case the backup has different ones
+  if (t.rally_divisions?.length) {
+    const { error } = await supabase.from('rally_divisions').upsert(t.rally_divisions, { onConflict: 'id' })
+    if (error) throw error
+  }
+  await insert('rally_players', t.rally_players)
+  await insert('rally_events', t.rally_events)
+  await insert('rally_leagues', t.rally_leagues)
+  await insert('rally_event_participants', t.rally_event_participants)
+  await insert('rally_matches', t.rally_matches)
 }
 
 export async function clearAll(): Promise<void> {

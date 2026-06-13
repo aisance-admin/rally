@@ -27,11 +27,13 @@ const toMatch = (r: Record<string, any>): Match => ({
   playerBId: r.player_b,
   scoreA: r.score_a,
   scoreB: r.score_b,
+  sets: (r.sets ?? null) as Match['sets'],
   winnerId: r.winner_id,
   eloDeltaWinner: r.elo_delta_winner,
   eloDeltaLoser: r.elo_delta_loser,
   divisionId: r.division_id,
   format: r.format,
+  status: (r.status ?? 'final') as Match['status'],
   playedAt: r.played_at,
 })
 
@@ -176,6 +178,7 @@ export async function fetchEventDetail(eventId: string): Promise<EventDetail> {
     tier: l.tier,
     color: l.color,
     format: l.format,
+    validatedAt: l.validated_at ?? null,
     players: parts
       .filter((pp) => pp.league_id === l.id)
       .map((pp) => playersById[pp.player_id])

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { Player } from '../types'
 import type { Store } from '../lib/store'
 import {
+  type CreateSeasonOpts,
   createSeasonFromDivisions,
   type DraftDivision,
   LEAGUE_COLORS,
@@ -24,6 +25,8 @@ export function DivisionDraft({
   subtitle,
   controls,
   note,
+  createOpts,
+  startLabel,
   onStarted,
   onCancel,
 }: {
@@ -37,6 +40,8 @@ export function DivisionDraft({
   subtitle: string
   controls?: React.ReactNode
   note?: React.ReactNode
+  createOpts?: CreateSeasonOpts
+  startLabel?: string
   onStarted: (id: string) => void
   onCancel: () => void
 }) {
@@ -95,7 +100,7 @@ export function DivisionDraft({
     if (!valid) return
     setBusy(true)
     try {
-      const id = await createSeasonFromDivisions(seriesId, seriesName, season, nonEmpty)
+      const id = await createSeasonFromDivisions(seriesId, seriesName, season, nonEmpty, createOpts)
       await store.refresh()
       onStarted(id)
     } finally {
@@ -117,7 +122,7 @@ export function DivisionDraft({
           {controls}
           <button onClick={onCancel} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-400 hover:text-white">Cancel</button>
           <button onClick={start} disabled={busy || !valid} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-4 py-2 text-xs font-bold text-white glow-brand disabled:opacity-40 disabled:shadow-none">
-            {busy ? 'Starting…' : `Start Season ${season}`}
+            {busy ? 'Starting…' : startLabel ?? `Start Season ${season}`}
           </button>
         </div>
       </div>
