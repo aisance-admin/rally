@@ -5,6 +5,7 @@ import type { MatchOpResult } from '../lib/api'
 import { roundRobin } from '../lib/planner'
 import { parseFormat, rankDivision, type RankedPlayer, type TieReason, type WL } from '../lib/seasons'
 import { Avatar } from './bits'
+import { Modal } from './Modal'
 
 // ── helpers ──
 function fixturesOf(players: Player[]): [Player, Player][] {
@@ -54,6 +55,16 @@ export function GroupSheet({
     return 'wl'
   })
   const [busyKey, setBusyKey] = useState<string | null>(null)
+  const [pendingMode, setPendingMode] = useState<Mode | null>(null)
+
+  // Warn before switching to a less-detailed mode than the data already entered (spec §4).
+  const levelOf = (s: Match['status']) => (s === 'final' ? 2 : s === 'wl' ? 1 : 0)
+  const modeLevel = (md: Mode) => (md === 'score' ? 2 : md === 'wl' ? 1 : 0)
+  const dataLevel = groupMatches.reduce((mx, m) => Math.max(mx, levelOf(m.status)), -1)
+  const changeMode = (target: Mode) => {
+    if (target !== mode && groupMatches.length && modeLevel(target) < dataLevel) setPendingMode(target)
+    else setMode(target)
+  }
 
   const standings = useMemo(
     () => rankDivision(league.players, matches, { multiSet, seed: hashId(league.id) }),
@@ -153,7 +164,7 @@ export function GroupSheet({
         <div className="space-y-3">
           {editable && (
             <div className="flex items-center justify-between gap-2">
-              <ModeSeg value={mode} onChange={setMode} />
+              <ModeSeg value={mode} onChange={changeMode} />
               <span className="text-[11px] text-ink-500">
                 {mode === 'wl' ? 'Tap the winner of each match' : mode === 'score' ? 'Enter exact scores' : 'Drag to rank — no scores'}
               </span>
@@ -232,6 +243,23 @@ export function GroupSheet({
           {readOnly && <div className="rounded-2xl bg-white/5 px-4 py-2.5 text-xs text-ink-500">This season is finished — results are read-only.</div>}
         </div>
       </div>
+
+      {pendingMode && (
+        <Modal onClose={() => setPendingMode(null)}>
+          <div className="px-5 py-5">
+            <h3 className="text-lg font-bold">Switch to {pendingMode === 'wl' ? 'Win / Loss' : 'Direct ranking'}?</h3>
+            <p className="mt-1 text-sm text-ink-500">
+              {pendingMode === 'rank'
+                ? 'Applying an order in Direct ranking replaces the match results already entered in this group.'
+                : 'Win/Loss records 1–0 only. Existing exact scores stay, but re-entering a match here drops its score.'}
+            </p>
+          </div>
+          <div className="flex gap-2 border-t hairline px-5 py-4">
+            <button onClick={() => setPendingMode(null)} className="glass-soft tap flex-1 rounded-xl py-2.5 text-sm font-semibold text-ink-300">Keep current mode</button>
+            <button onClick={() => { setMode(pendingMode); setPendingMode(null) }} className="tap flex-1 rounded-xl bg-gradient-to-br from-brand to-brand2 py-2.5 text-sm font-bold text-white glow-brand">Switch anyway</button>
+          </div>
+        </Modal>
+      )}
     </div>
   )
 }

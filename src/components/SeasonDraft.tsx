@@ -47,6 +47,7 @@ export function DivisionDraft({
 }) {
   const [divisions, setDivisions] = useState<DraftDivision[]>(() => clone(initialDivisions))
   const [busy, setBusy] = useState(false)
+  const [replacing, setReplacing] = useState<{ div: number; id: string } | null>(null)
   const showRecord = !!prevRecords
 
   // Re-seed when the parent recomputes the layout (reshuffle / promote count).
@@ -88,6 +89,22 @@ export function DivisionDraft({
     )
   const addToDivision = (player: Player, toDiv: number) =>
     setDivisions((divs) => divs.map((d, i) => (i === toDiv ? { ...d, players: [...d.players, player] } : d)))
+  // Replace: a bench player takes a departing player's exact spot in one action.
+  const doReplace = (newPlayer: Player) => {
+    if (!replacing) return
+    setDivisions((divs) =>
+      divs.map((d, i) => {
+        if (i !== replacing.div) return d
+        const idx = d.players.findIndex((p) => p.id === replacing.id)
+        if (idx < 0) return d
+        const players = [...d.players]
+        players[idx] = newPlayer // departing player drops to the bench, new one takes the exact spot
+        return { ...d, players }
+      }),
+    )
+    setReplacing(null)
+  }
+  const replacingName = replacing ? divisions[replacing.div]?.players.find((p) => p.id === replacing.id)?.name : null
   const addDivision = () =>
     setDivisions((divs) => [
       ...divs,
@@ -160,6 +177,7 @@ export function DivisionDraft({
                     <div className="flex items-center gap-0.5">
                       <IconBtn label="Move up a division" disabled={i === 0} onClick={() => move(i, p.id, i - 1)}>▲</IconBtn>
                       <IconBtn label="Move down a division" disabled={i === divisions.length - 1} onClick={() => move(i, p.id, i + 1)}>▼</IconBtn>
+                      <IconBtn label="Replace with a benched player" onClick={() => setReplacing(replacing?.id === p.id ? null : { div: i, id: p.id })} active={replacing?.id === p.id}>⇄</IconBtn>
                       <IconBtn label="Sit out this season" onClick={() => drop(i, p.id)} danger>✕</IconBtn>
                     </div>
                   </div>
@@ -176,12 +194,15 @@ export function DivisionDraft({
       </button>
 
       <div className="glass overflow-hidden rounded-3xl">
-        <div className="px-4 py-3 text-sm font-bold">
-          Sitting out <span className="text-ink-500">· {bench.length}</span>
-          <span className="ml-2 text-[11px] font-normal text-ink-500">tap a division to add them in</span>
+        <div className="flex items-center justify-between gap-2 px-4 py-3 text-sm font-bold">
+          <span>
+            Sitting out <span className="text-ink-500">· {bench.length}</span>
+            <span className="ml-2 text-[11px] font-normal text-ink-500">{replacing ? `pick who takes ${replacingName ?? 'the'}'s spot` : 'tap a division to add them in'}</span>
+          </span>
+          {replacing && <button onClick={() => setReplacing(null)} className="rounded-lg bg-white/8 px-2 py-1 text-[11px] font-semibold text-ink-300 tap">Cancel replace</button>}
         </div>
         {bench.length === 0 ? (
-          <div className="px-4 py-5 text-center text-xs text-ink-500">Everyone's placed.</div>
+          <div className="px-4 py-5 text-center text-xs text-ink-500">Everyone's placed.{replacing && ' Add a player to the roster first to swap them in.'}</div>
         ) : (
           <div className="divide-hair">
             {bench.map((p) => (
@@ -190,13 +211,17 @@ export function DivisionDraft({
                 <Avatar name={p.name} size={26} />
                 <span className="min-w-0 flex-1 truncate text-sm font-semibold">{p.name}</span>
                 <RecordChip rec={prevRecords?.get(p.id)} elo={p.elo} showRecord={showRecord} />
-                <div className="flex flex-wrap gap-1">
-                  {divisions.map((d, i) => (
-                    <button key={i} onClick={() => addToDivision(p, i)} className="tap rounded-lg px-2 py-1 text-[11px] font-semibold" style={{ background: `${d.color}22`, color: d.color }}>
-                      + {d.name}
-                    </button>
-                  ))}
-                </div>
+                {replacing ? (
+                  <button onClick={() => doReplace(p)} className="tap rounded-lg bg-brand/20 px-2.5 py-1 text-[11px] font-bold text-brand-400 ring-1 ring-brand/30">Place here →</button>
+                ) : (
+                  <div className="flex flex-wrap gap-1">
+                    {divisions.map((d, i) => (
+                      <button key={i} onClick={() => addToDivision(p, i)} className="tap rounded-lg px-2 py-1 text-[11px] font-semibold" style={{ background: `${d.color}22`, color: d.color }}>
+                        + {d.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -233,12 +258,14 @@ function IconBtn({
   onClick,
   disabled,
   danger,
+  active,
   label,
 }: {
   children: React.ReactNode
   onClick: () => void
   disabled?: boolean
   danger?: boolean
+  active?: boolean
   label: string
 }) {
   return (
@@ -247,7 +274,7 @@ function IconBtn({
       onClick={onClick}
       disabled={disabled}
       className={`tap grid h-7 w-7 place-items-center rounded-lg text-[11px] font-bold disabled:opacity-20 ${
-        danger ? 'text-ink-500 hover:bg-loss/15 hover:text-loss' : 'text-ink-400 hover:bg-white/10 hover:text-white'
+        active ? 'bg-brand/25 text-brand-400 ring-1 ring-brand/40' : danger ? 'text-ink-500 hover:bg-loss/15 hover:text-loss' : 'text-ink-400 hover:bg-white/10 hover:text-white'
       }`}
     >
       {children}

@@ -210,6 +210,12 @@ export async function finishEvent(eventId: string): Promise<void> {
   if (error) throw error
 }
 
+/** Reopen a finished season for corrections (allowed until the next season starts). */
+export async function reopenEvent(eventId: string): Promise<void> {
+  const { error } = await supabase.from('rally_events').update({ status: 'live' }).eq('id', eventId)
+  if (error) throw error
+}
+
 export async function deleteEvent(eventId: string): Promise<void> {
   const { error } = await supabase.from('rally_events').delete().eq('id', eventId)
   if (error) throw error

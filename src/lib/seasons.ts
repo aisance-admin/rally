@@ -433,47 +433,70 @@ export async function createSeasonFromDivisions(
 
 // ───────────────────────── qualifier → divisions (spec §6) ─────────────────────────
 
-/** Default position→division mapping for `groups` qualifier groups of up to
- *  `maxPos` players: 1st of every group → Division 1, 2nd → Division 2, … */
-export function defaultQualifierMapping(maxPos: number): Record<number, number> {
-  const m: Record<number, number> = {}
-  for (let pos = 1; pos <= maxPos; pos++) m[pos] = pos
+/** How to split players of one finishing position when it feeds several divisions. */
+export type QualSplit = 'random' | 'points' | 'rating'
+/** A finishing position maps to `span` divisions starting at `div` (span 1 = one division). */
+export interface PositionRule { div: number; span: number }
+
+/** Default rule for groups of up to `maxPos`: 1st of every group → Division 1,
+ *  2nd → Division 2, … (each position feeds exactly one division). */
+export function defaultQualifierMapping(maxPos: number): Record<number, PositionRule> {
+  const m: Record<number, PositionRule> = {}
+  for (let pos = 1; pos <= maxPos; pos++) m[pos] = { div: pos, span: 1 }
   return m
 }
 
-/** Build Season-1 divisions from finished qualifier groups using a
- *  position→division rule: a player who finished `pos` in their group lands in
- *  division `mapping[pos]`. Within a division, stronger qualifier finishes seed
- *  higher. Divisions keep the standard names/colors. */
+/** Build Season-1 divisions from finished qualifier groups (spec §6 / §10.1).
+ *  Each finishing position maps to a starting division and a span of divisions;
+ *  when a position feeds several divisions, its players are split across them by
+ *  `split` (random default, or by qualifier points / by rating) — best to the
+ *  higher division. Within a division, higher finishes seed higher. */
 export function buildDivisionsFromQualifier(
   qual: EventDetail,
-  mapping: Record<number, number>,
+  mapping: Record<number, PositionRule>,
+  split: QualSplit = 'random',
+  seed = 0,
 ): DraftDivision[] {
   const groups = [...qual.leagues].sort((a, b) => a.tier - b.tier)
-  // collect { player, division, pos } for everyone, ranking each group
-  const placed: { player: Player; div: number; pos: number; group: number }[] = []
+  type Placed = { player: Player; pos: number; group: number; pts: number; wins: number }
+  const byPos = new Map<number, Placed[]>()
   groups.forEach((g, gi) => {
     const ranked = rankDivision(g.players, qual.matches, { multiSet: parseFormat(g.format).sets > 1, seed: hash(g.id) })
     ranked.forEach((r, idx) => {
       const pos = idx + 1
-      const div = Math.max(1, mapping[pos] ?? pos)
-      placed.push({ player: r.player, div, pos, group: gi })
+      const arr = byPos.get(pos) ?? []
+      arr.push({ player: r.player, pos, group: gi, pts: r.pointDiff, wins: r.wins })
+      byPos.set(pos, arr)
     })
   })
-  const maxDiv = placed.reduce((m, p) => Math.max(m, p.div), 1)
-  const out: DraftDivision[] = []
-  for (let d = 1; d <= maxDiv; d++) {
-    const members = placed
-      .filter((p) => p.div === d)
-      .sort((a, b) => a.pos - b.pos || a.group - b.group)
-      .map((p) => p.player)
-    out.push({
-      name: LEAGUE_NAMES[d - 1] ?? `Division ${d}`,
-      color: LEAGUE_COLORS[d - 1] ?? '#9aa4b2',
-      players: members,
+
+  const divPlayers = new Map<number, Player[]>()
+  for (const pos of [...byPos.keys()].sort((a, b) => a - b)) {
+    const rule = mapping[pos] ?? { div: pos, span: 1 }
+    const startDiv = Math.max(1, rule.div)
+    const span = Math.max(1, rule.span)
+    let players = byPos.get(pos)!.slice()
+    if (split === 'rating') players.sort((a, b) => b.player.elo - a.player.elo)
+    else if (split === 'points') players.sort((a, b) => b.pts - a.pts || b.wins - a.wins)
+    else players = players.map((p) => ({ p, k: hash(`${seed}:${pos}:${p.player.id}`) })).sort((a, b) => a.k - b.k).map((x) => x.p)
+    const n = players.length
+    players.forEach((pl, k) => {
+      const chunk = span === 1 ? 0 : Math.min(span - 1, Math.floor((k * span) / n))
+      const div = startDiv + chunk
+      const arr = divPlayers.get(div) ?? []
+      arr.push(pl.player)
+      divPlayers.set(div, arr)
     })
   }
-  return out.filter((d) => d.players.length > 0)
+
+  const maxDiv = Math.max(0, ...divPlayers.keys())
+  const out: DraftDivision[] = []
+  for (let d = 1; d <= maxDiv; d++) {
+    const members = divPlayers.get(d) ?? []
+    if (!members.length) continue
+    out.push({ name: LEAGUE_NAMES[d - 1] ?? `Division ${d}`, color: LEAGUE_COLORS[d - 1] ?? '#9aa4b2', players: members })
+  }
+  return out
 }
 
 /** Map each player to the division tier they were in for a season — used to draw

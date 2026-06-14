@@ -3,7 +3,7 @@ import type { EventDetail, LeagueWithPlayers, Match, Player } from '../types'
 import type { MatchOpResult } from '../lib/api'
 import type { Store } from '../lib/store'
 import { manualSizes, roundRobin } from '../lib/planner'
-import { deleteEvent, fetchEventDetail, finishEvent } from '../lib/events'
+import { deleteEvent, fetchEventDetail, finishEvent, reopenEvent } from '../lib/events'
 import { Avatar } from './bits'
 import { SkillBadge } from './SkillBadge'
 import { Modal } from './Modal'
@@ -22,8 +22,10 @@ import {
   LEAGUE_NAMES,
   maxLeaguesFor,
   parseFormat,
+  type PositionRule,
   previewDivisionSizes,
   type PromotionConfig,
+  type QualSplit,
   rankDivision,
   type RankedPlayer,
   seasonRecordsFor,
@@ -60,7 +62,8 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
   const [builtDivisions, setBuiltDivisions] = useState<DraftDivision[] | null>(null)
   const [qualEventId, setQualEventId] = useState<string | null>(null)
   const [mapDetail, setMapDetail] = useState<EventDetail | null>(null)
-  const [mapping, setMapping] = useState<Record<number, number>>({})
+  const [mapping, setMapping] = useState<Record<number, PositionRule>>({})
+  const [qualSplit, setQualSplit] = useState<QualSplit>('random')
 
   const openReq = useRef(0)
   const openSeason = async (id: string) => {
@@ -183,7 +186,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
         subtitle={`Promotion / relegation from Season ${draftPrev.event.season}`}
         createOpts={{ status: 'live', format }}
         note={<>Divisions are kept. The top {promotionCfg.up} of each division move <span className="text-win">up</span>, the bottom {promotionCfg.down} move <span className="text-loss">down</span> — everyone else stays. {nextPreview?.warning && <span className="text-brand-400"> {nextPreview.warning}</span>}</>}
-        controls={<div className="flex flex-wrap items-center gap-1.5"><PromoteControl cfg={promotionCfg} onChange={setPromotionCfg} /><FormatControl value={format} onChange={setFormat} /></div>}
+        controls={<div className="flex flex-wrap items-center gap-1.5"><PromoteControl cfg={promotionCfg} onChange={setPromotionCfg} divisions={[...draftPrev.leagues].sort((a, b) => a.tier - b.tier).map((l) => ({ name: l.name, color: l.color }))} /><FormatControl value={format} onChange={setFormat} /></div>}
         onStarted={(id) => { setDraftPrev(null); openSeason(id) }}
         onCancel={backToHub}
       />
@@ -196,6 +199,8 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
         qual={mapDetail}
         mapping={mapping}
         onChange={setMapping}
+        split={qualSplit}
+        onSplitChange={setQualSplit}
         onBuild={(divs) => {
           setBuiltDivisions(divs)
           setQualEventId(mapDetail.event.id)
@@ -231,6 +236,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
         onChanged={() => openId && openSeason(openId)}
         onBack={backToHub}
         onStartNext={() => startNext(detail.event.id)}
+        onReopen={async () => { await reopenEvent(detail.event.id); await store.refresh(); openSeason(detail.event.id) }}
         onFormDivisions={() => {
           const maxPos = Math.max(1, ...detail.leagues.map((l) => l.players.length))
           setMapDetail(detail)
@@ -456,20 +462,29 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
 
 // ───────────────────────── qualifier → division mapping (spec §6) ─────────────────────────
 
-function MappingEditor({ qual, mapping, onChange, onBuild, onCancel }: {
-  qual: EventDetail; mapping: Record<number, number>; onChange: (m: Record<number, number>) => void; onBuild: (divs: DraftDivision[]) => void; onCancel: () => void
+function MappingEditor({ qual, mapping, onChange, split, onSplitChange, onBuild, onCancel }: {
+  qual: EventDetail; mapping: Record<number, PositionRule>; onChange: (m: Record<number, PositionRule>) => void; split: QualSplit; onSplitChange: (s: QualSplit) => void; onBuild: (divs: DraftDivision[]) => void; onCancel: () => void
 }) {
   const maxPos = Math.max(1, ...qual.leagues.map((l) => l.players.length))
-  const preview = useMemo(() => buildDivisionsFromQualifier(qual, mapping), [qual, mapping])
+  const preview = useMemo(() => buildDivisionsFromQualifier(qual, mapping, split), [qual, mapping, split])
   const maxDiv = preview.length
-  const setPos = (pos: number, div: number) => onChange({ ...mapping, [pos]: Math.max(1, div) })
+  const ruleOf = (pos: number): PositionRule => mapping[pos] ?? { div: pos, span: 1 }
+  const setRule = (pos: number, patch: Partial<PositionRule>) => {
+    const r = ruleOf(pos)
+    onChange({ ...mapping, [pos]: { div: Math.max(1, patch.div ?? r.div), span: Math.max(1, patch.span ?? r.span) } })
+  }
+  const anySplit = Array.from({ length: maxPos }, (_, i) => ruleOf(i + 1)).some((r) => r.span > 1)
+  const divLabel = (rule: PositionRule) =>
+    rule.span <= 1
+      ? LEAGUE_NAMES[rule.div - 1] ?? `Div ${rule.div}`
+      : `Div ${rule.div}–${rule.div + rule.span - 1}`
 
   return (
     <div className="space-y-4">
       <div className="glass flex flex-wrap items-center justify-between gap-3 rounded-3xl p-4">
         <div>
           <div className="text-lg font-extrabold">Form divisions from the qualifier</div>
-          <div className="mt-0.5 text-xs text-ink-500">Each finishing position lands in a division. Default: 1st of every group → Division 1, 2nd → Division 2, …</div>
+          <div className="mt-0.5 text-xs text-ink-500">Each finishing position feeds a division (or several). Default: 1st of every group → Division 1, 2nd → Division 2, …</div>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={onCancel} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-400 hover:text-white">Cancel</button>
@@ -477,20 +492,30 @@ function MappingEditor({ qual, mapping, onChange, onBuild, onCancel }: {
         </div>
       </div>
 
+      {anySplit && (
+        <div className="glass-soft flex flex-wrap items-center gap-2 rounded-2xl px-4 py-2.5">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">When one position feeds several divisions, split by</span>
+          <Seg value={split} onChange={onSplitChange} options={[['random', 'Random'], ['points', 'By points'], ['rating', 'By rating']]} />
+        </div>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="glass overflow-hidden rounded-3xl">
-          <div className="px-4 py-3 text-sm font-bold">Position → Division</div>
+          <div className="grid grid-cols-[1fr_auto_auto_64px] gap-2 px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
+            <span>Finished</span><span className="text-center">Division</span><span className="text-center">Spread</span><span className="text-right">Lands in</span>
+          </div>
           <div className="divide-hair">
-            {Array.from({ length: maxPos }, (_, i) => i + 1).map((pos) => (
-              <div key={pos} className="flex items-center justify-between gap-2 px-4 py-2.5">
-                <span className="text-sm font-semibold">Finished <span className="font-mono text-brand-400">{ordinal(pos)}</span> in group</span>
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-ink-500">→</span>
-                  <MiniStep value={mapping[pos] ?? pos} min={1} max={maxPos} onChange={(v) => setPos(pos, v)} />
-                  <span className="w-16 text-right text-xs font-semibold" style={{ color: LEAGUE_COLORS[(mapping[pos] ?? pos) - 1] ?? '#9aa4b2' }}>{LEAGUE_NAMES[(mapping[pos] ?? pos) - 1] ?? `Div ${mapping[pos] ?? pos}`}</span>
+            {Array.from({ length: maxPos }, (_, i) => i + 1).map((pos) => {
+              const r = ruleOf(pos)
+              return (
+                <div key={pos} className="grid grid-cols-[1fr_auto_auto_64px] items-center gap-2 px-4 py-2">
+                  <span className="text-sm font-semibold"><span className="font-mono text-brand-400">{ordinal(pos)}</span> in group</span>
+                  <MiniStep value={r.div} min={1} max={maxPos} onChange={(v) => setRule(pos, { div: v })} />
+                  <MiniStep value={r.span} min={1} max={maxPos} onChange={(v) => setRule(pos, { span: v })} />
+                  <span className="text-right text-[11px] font-semibold" style={{ color: LEAGUE_COLORS[r.div - 1] ?? '#9aa4b2' }}>{divLabel(r)}</span>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
 
@@ -517,8 +542,8 @@ function MappingEditor({ qual, mapping, onChange, onBuild, onCancel }: {
 
 // ───────────────────────── season view (live / qualifying / final) ─────────────────────────
 
-function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecords, prevTiers, onSelect, onChanged, onBack, onStartNext, onFormDivisions }: {
-  store: Store; detail: EventDetail; loading: boolean; readOnly: boolean; canStartNext: boolean; prevRecords?: Map<string, WL> | null; prevTiers?: Map<string, number> | null; onSelect: (id: string) => void; onChanged: () => void; onBack: () => void; onStartNext: () => void; onFormDivisions: () => void
+function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecords, prevTiers, onSelect, onChanged, onBack, onStartNext, onReopen, onFormDivisions }: {
+  store: Store; detail: EventDetail; loading: boolean; readOnly: boolean; canStartNext: boolean; prevRecords?: Map<string, WL> | null; prevTiers?: Map<string, number> | null; onSelect: (id: string) => void; onChanged: () => void; onBack: () => void; onStartNext: () => void; onReopen: () => void; onFormDivisions: () => void
 }) {
   const [matches, setMatches] = useState<Match[]>(detail.matches)
   const [validated, setValidated] = useState<Record<string, string | null>>(() => Object.fromEntries(detail.leagues.map((l) => [l.id, l.validatedAt])))
@@ -587,7 +612,12 @@ function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecord
         </div>
         <div className="flex gap-2">
           {readOnly ? (
-            canStartNext && <button onClick={onStartNext} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-xs font-bold text-white glow-brand">⚡ Start Season {detail.event.season + 1}</button>
+            canStartNext && (
+              <>
+                <button onClick={onReopen} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white" title="Reopen this season to correct results — allowed until the next season starts">↺ Reopen</button>
+                <button onClick={onStartNext} className="tap rounded-xl bg-gradient-to-br from-brand to-brand2 px-3.5 py-2 text-xs font-bold text-white glow-brand">⚡ Start Season {detail.event.season + 1}</button>
+              </>
+            )
           ) : isQualifying ? (
             <>
               <button onClick={async () => { await deleteEvent(detail.event.id); await store.refresh(); onBack() }} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-500 hover:text-loss">Discard</button>
@@ -769,14 +799,66 @@ function MiniStep({ value, min, max, onChange }: { value: number; min: number; m
   )
 }
 
-function PromoteControl({ cfg, onChange }: { cfg: PromotionConfig; onChange: (c: PromotionConfig) => void }) {
+function PromoteControl({ cfg, onChange, divisions }: { cfg: PromotionConfig; onChange: (c: PromotionConfig) => void; divisions?: { name: string; color: string }[] }) {
+  const [open, setOpen] = useState(false)
+  const setOverride = (i: number, key: 'up' | 'down', val: number) => {
+    const ov = { ...(cfg.overrides ?? {}) }
+    ov[i] = { ...ov[i], [key]: val }
+    onChange({ ...cfg, overrides: ov })
+  }
+  const clearOverride = (i: number) => {
+    const ov = { ...(cfg.overrides ?? {}) }
+    delete ov[i]
+    onChange({ ...cfg, overrides: Object.keys(ov).length ? ov : undefined })
+  }
+  const ovCount = cfg.overrides ? Object.keys(cfg.overrides).length : 0
   return (
-    <div className="glass-soft flex items-center gap-2.5 rounded-xl px-3 py-1.5" title="How many move up / down per division boundary">
-      <span className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-win">↑ Up</span>
-      <MiniStep value={cfg.up} min={0} max={4} onChange={(v) => onChange({ ...cfg, up: v })} />
-      <span className="h-4 w-px bg-white/10" />
-      <span className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-loss">↓ Down</span>
-      <MiniStep value={cfg.down} min={0} max={4} onChange={(v) => onChange({ ...cfg, down: v })} />
+    <div className="relative">
+      <div className="glass-soft flex items-center gap-2.5 rounded-xl px-3 py-1.5" title="How many move up / down per division boundary">
+        <span className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-win">↑ Up</span>
+        <MiniStep value={cfg.up} min={0} max={4} onChange={(v) => onChange({ ...cfg, up: v })} />
+        <span className="h-4 w-px bg-white/10" />
+        <span className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-loss">↓ Down</span>
+        <MiniStep value={cfg.down} min={0} max={4} onChange={(v) => onChange({ ...cfg, down: v })} />
+        {divisions && divisions.length > 0 && (
+          <>
+            <span className="h-4 w-px bg-white/10" />
+            <button onClick={() => setOpen((o) => !o)} className={`tap rounded-lg px-1.5 text-xs font-bold ${ovCount ? 'text-brand-400' : 'text-ink-400 hover:text-white'}`} title="Per-division overrides">⚙{ovCount ? ` ${ovCount}` : ''}</button>
+          </>
+        )}
+      </div>
+      {open && divisions && (
+        <div className="absolute right-0 z-40 mt-2 w-72 rounded-2xl bg-ink-900/95 p-3 ring-1 ring-white/12 backdrop-blur-xl">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-ink-400">Per-division rule</span>
+            <button onClick={() => setOpen(false)} className="text-ink-500 hover:text-white">✕</button>
+          </div>
+          <div className="space-y-1.5">
+            {divisions.map((d, i) => {
+              const ov = cfg.overrides?.[i]
+              const up = ov?.up ?? cfg.up
+              const down = ov?.down ?? cfg.down
+              const isTop = i === 0, isBot = i === divisions.length - 1
+              return (
+                <div key={i} className="flex items-center justify-between gap-2 rounded-xl bg-white/[0.04] px-2.5 py-1.5">
+                  <span className="flex min-w-0 items-center gap-1.5 text-xs font-semibold">
+                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: d.color }} />
+                    <span className="truncate">{d.name}</span>
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] font-bold text-win">↑</span>
+                    {isTop ? <span className="w-12 text-center text-[10px] text-ink-600">—</span> : <MiniStep value={up} min={0} max={4} onChange={(v) => setOverride(i, 'up', v)} />}
+                    <span className="text-[10px] font-bold text-loss">↓</span>
+                    {isBot ? <span className="w-12 text-center text-[10px] text-ink-600">—</span> : <MiniStep value={down} min={0} max={4} onChange={(v) => setOverride(i, 'down', v)} />}
+                    <button onClick={() => clearOverride(i)} title="Reset to global" className={`text-[10px] ${ov ? 'text-ink-400 hover:text-white' : 'text-transparent'}`}>↺</button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <p className="mt-2 text-[10px] text-ink-500">Defaults to the global rule. Top can't promote out; bottom can't relegate out.</p>
+        </div>
+      )}
     </div>
   )
 }
