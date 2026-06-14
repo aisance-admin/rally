@@ -656,13 +656,27 @@ function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecord
           <div className="px-5 py-5">
             <h3 className="text-lg font-bold">Finish this season?</h3>
             <p className="mt-1 text-sm text-ink-500">
-              Ratings are saved after each match. Finishing keeps the season viewable and lets you start the next one — the winner of each division goes up, the last goes down.
-              {openGroups > 0 && <span className="mt-2 block font-semibold text-brand-400">{openGroups} group{openGroups === 1 ? '' : 's'} not validated yet — you can still finish.</span>}
+              Ratings are saved after each match. Finishing computes promotions — the winner of each division goes up, the last goes down — and proposes the next season.
+              {openGroups > 0 && <span className="mt-2 block font-semibold text-brand-400">{openGroups} group{openGroups === 1 ? '' : 's'} not validated yet. Validate them as part of finishing, or finish anyway.</span>}
             </p>
           </div>
-          <div className="flex gap-2 border-t hairline px-5 py-4">
+          <div className="flex flex-wrap gap-2 border-t hairline px-5 py-4">
             <button onClick={() => setConfirmFinish(false)} className="glass-soft tap flex-1 rounded-xl py-2.5 text-sm font-semibold text-ink-300">Keep open</button>
-            <button onClick={async () => { await finishEvent(detail.event.id); await store.refresh(); setConfirmFinish(false); onChanged() }} className="tap flex-1 rounded-xl bg-gradient-to-br from-brand to-brand2 py-2.5 text-sm font-bold text-white glow-brand">Finish season</button>
+            {openGroups > 0 && (
+              <button onClick={async () => { await finishEvent(detail.event.id); await store.refresh(); setConfirmFinish(false); onChanged() }} className="glass-soft tap flex-1 rounded-xl py-2.5 text-sm font-semibold text-ink-300">Finish anyway</button>
+            )}
+            <button
+              onClick={async () => {
+                await Promise.all(leagues.filter((l) => validated[l.id] == null).map((l) => store.validateLeague(l.id, true)))
+                await finishEvent(detail.event.id)
+                await store.refresh()
+                setConfirmFinish(false)
+                onChanged()
+              }}
+              className="tap flex-1 rounded-xl bg-gradient-to-br from-brand to-brand2 py-2.5 text-sm font-bold text-white glow-brand"
+            >
+              {openGroups > 0 ? 'Validate all & finish' : 'Finish season'}
+            </button>
           </div>
         </Modal>
       )}

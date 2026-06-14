@@ -210,10 +210,53 @@ export async function finishEvent(eventId: string): Promise<void> {
   if (error) throw error
 }
 
-/** Reopen a finished season for corrections (allowed until the next season starts). */
+/** Reopen a finished season for corrections — enforced at the data layer: only
+ *  the latest season of its series may reopen; once a later season exists the
+ *  correction window is permanently closed (spec §5d). */
 export async function reopenEvent(eventId: string): Promise<void> {
+  const { data: ev, error: e1 } = await supabase.from('rally_events').select('name, duration_min').eq('id', eventId).single()
+  if (e1) throw e1
+  const { seriesId } = parseSeriesName(ev.name)
+  const { data: all } = await supabase.from('rally_events').select('name, duration_min').limit(2000)
+  const laterExists = (all ?? []).some((e) => parseSeriesName(e.name).seriesId === seriesId && (e.duration_min ?? 0) > (ev.duration_min ?? 0))
+  if (laterExists) throw new Error('A later season already exists — this season is permanently locked.')
   const { error } = await supabase.from('rally_events').update({ status: 'live' }).eq('id', eventId)
   if (error) throw error
+}
+
+export interface PlayerSeason {
+  seriesId: string
+  seriesName: string
+  season: number
+  status: string
+  divisionName: string
+  divisionColor: string
+  tier: number
+}
+
+/** A player's division in every season they played — for the per-player
+ *  division-across-seasons view (spec §8). */
+export async function fetchPlayerSeasons(playerId: string): Promise<PlayerSeason[]> {
+  const partRes = await supabase.from('rally_event_participants').select('event_id, league_id').eq('player_id', playerId)
+  if (partRes.error) throw partRes.error
+  const parts = partRes.data ?? []
+  if (!parts.length) return []
+  const eventIds = [...new Set(parts.map((p) => p.event_id))]
+  const leagueIds = [...new Set(parts.map((p) => p.league_id).filter(Boolean))]
+  const [evRes, lgRes] = await Promise.all([
+    supabase.from('rally_events').select('id, name, duration_min, status').in('id', eventIds),
+    leagueIds.length ? supabase.from('rally_leagues').select('id, name, color, tier').in('id', leagueIds) : Promise.resolve({ data: [] as any[] }),
+  ])
+  const evById = Object.fromEntries((evRes.data ?? []).map((e) => [e.id, e]))
+  const lgById = Object.fromEntries((lgRes.data ?? []).map((l) => [l.id, l]))
+  const rows: PlayerSeason[] = []
+  for (const p of parts) {
+    const ev = evById[p.event_id], lg = lgById[p.league_id]
+    if (!ev || !lg) continue
+    const { name, seriesId } = parseSeriesName(ev.name)
+    rows.push({ seriesId, seriesName: name, season: ev.duration_min ?? 1, status: ev.status, divisionName: lg.name, divisionColor: lg.color, tier: lg.tier })
+  }
+  return rows.sort((a, b) => a.seriesName.localeCompare(b.seriesName) || a.season - b.season)
 }
 
 export async function deleteEvent(eventId: string): Promise<void> {

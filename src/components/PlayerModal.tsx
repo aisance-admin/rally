@@ -1,8 +1,9 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Division, Match, Player } from '../types'
 import { Avatar, Sparkline } from './bits'
 import { SkillBadge } from './SkillBadge'
 import { skillFromElo } from '../lib/elo'
+import { fetchPlayerSeasons, type PlayerSeason } from '../lib/events'
 import { timeAgo, winRate } from '../lib/format'
 import { Modal } from './Modal'
 
@@ -34,6 +35,18 @@ export function PlayerModal({
         .slice(0, 8),
     [matches, player.id],
   )
+
+  const [seasons, setSeasons] = useState<PlayerSeason[]>([])
+  useEffect(() => {
+    let on = true
+    fetchPlayerSeasons(player.id).then((s) => on && setSeasons(s)).catch(() => {})
+    return () => { on = false }
+  }, [player.id])
+  const bySeries = useMemo(() => {
+    const m = new Map<string, PlayerSeason[]>()
+    for (const s of seasons) { const a = m.get(s.seriesId) ?? []; a.push(s); m.set(s.seriesId, a) }
+    return [...m.values()]
+  }, [seasons])
 
   return (
     <Modal onClose={onClose} wide>
@@ -84,6 +97,34 @@ export function PlayerModal({
           <Sparkline data={player.history.slice(-20)} color={div?.color ?? '#ff5500'} width={520} height={90} />
         </div>
       </div>
+
+      {bySeries.length > 0 && (
+        <div className="px-5 pb-2">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-500">Divisions by season</div>
+          <div className="space-y-2">
+            {bySeries.map((arr) => (
+              <div key={arr[0].seriesId} className="rounded-xl bg-white/[0.05] p-2.5 ring-1 ring-white/10">
+                <div className="mb-1.5 text-[11px] font-semibold text-ink-400">{arr[0].seriesName}</div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {arr.map((s, i) => {
+                    const prev = i > 0 ? arr[i - 1] : null
+                    const mv = prev ? (prev.tier > s.tier ? '▲' : prev.tier < s.tier ? '▼' : '–') : null
+                    const mvColor = mv === '▲' ? '#34d399' : mv === '▼' ? '#fb6f7d' : '#7c8696'
+                    return (
+                      <span key={`${s.season}:${s.divisionName}`} className="flex items-center gap-1.5">
+                        {mv && <span className="text-[11px] font-bold" style={{ color: mvColor }}>{mv}</span>}
+                        <span className="rounded-lg px-2 py-1 text-[11px] font-semibold" style={{ background: `${s.divisionColor}22`, color: s.divisionColor }}>
+                          {s.season >= 1 ? `S${s.season}` : 'Q'} · {s.divisionName}
+                        </span>
+                      </span>
+                    )
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="px-5 pb-6">
         <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-ink-500">

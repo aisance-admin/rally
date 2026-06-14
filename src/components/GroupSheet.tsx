@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import type { LeagueWithPlayers, Match, Player, SetScore } from '../types'
 import type { Store } from '../lib/store'
 import type { MatchOpResult } from '../lib/api'
@@ -73,12 +73,24 @@ export function GroupSheet({
   const played = groupMatches.length
   const tiedNeedingPts = standings.filter((s) => s.reason === 'needs-pts').map((s) => s.player)
 
-  const run = async (key: string, fn: () => Promise<MatchOpResult | void>) => {
+  const rowRefs = useRef<Record<string, HTMLElement | null>>({})
+  // After a save, bring the next unentered match into view (spec §3b).
+  const advanceFrom = (key: string) => {
+    const order = fx.map((f) => `${f[0].id}:${f[1].id}`)
+    const start = order.indexOf(key)
+    for (let i = start + 1; i < order.length; i++) {
+      const [aId, bId] = order[i].split(':')
+      if (!findMatch(matches, aId, bId)) { rowRefs.current[order[i]]?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return }
+    }
+  }
+
+  const run = async (key: string, fn: () => Promise<MatchOpResult | void>, advance = false) => {
     if (busyKey) return
     setBusyKey(key)
     try {
       const res = await fn()
       if (res) onMatchOp(res)
+      if (advance) advanceFrom(key)
     } finally {
       setBusyKey(null)
     }
@@ -91,6 +103,7 @@ export function GroupSheet({
     const loserId = winnerId === a.id ? b.id : a.id
     return run(`${a.id}:${b.id}`, () =>
       store.recordMatch({ matchId: existing?.id, winnerId, loserId, winnerScore: 1, loserScore: 0, status: 'wl', format: league.format, eventId, leagueId: league.id }),
+      !existing, // advance to the next match only when entering a new one
     )
   }
   const clearResult = (a: Player, b: Player) => {
@@ -104,6 +117,7 @@ export function GroupSheet({
     const loserId = winnerId === a.id ? b.id : a.id
     return run(`${a.id}:${b.id}`, () =>
       store.recordMatch({ matchId: existing?.id, winnerId, loserId, winnerScore, loserScore, sets, status: 'final', format: league.format, eventId, leagueId: league.id }),
+      !existing,
     )
   }
 
@@ -221,18 +235,22 @@ export function GroupSheet({
                   const [a, b] = f
                   const m = findMatch(matches, a.id, b.id)
                   const key = `${a.id}:${b.id}`
-                  return mode === 'wl' ? (
-                    <WLRow
-                      key={key} a={a} b={b} match={m} disabled={!editable} busy={busyKey === key}
-                      onPick={(wid) => pickWinner(a, b, wid)} onClear={() => clearResult(a, b)}
-                    />
-                  ) : (
-                    <ScoreRow
-                      key={key} a={a} b={b} match={m} multiSet={multiSet} pointsTo={fmt.pointsTo}
-                      disabled={!editable} busy={busyKey === key}
-                      onSave={(winnerId, ws, ls, sets) => saveScore(a, b, winnerId, ws, ls, sets)}
-                      onClear={m && editable ? () => clearResult(a, b) : undefined}
-                    />
+                  return (
+                    <div key={key} ref={(el) => { rowRefs.current[key] = el }}>
+                      {mode === 'wl' ? (
+                        <WLRow
+                          a={a} b={b} match={m} disabled={!editable} busy={busyKey === key}
+                          onPick={(wid) => pickWinner(a, b, wid)} onClear={() => clearResult(a, b)}
+                        />
+                      ) : (
+                        <ScoreRow
+                          a={a} b={b} match={m} multiSet={multiSet} pointsTo={fmt.pointsTo}
+                          disabled={!editable} busy={busyKey === key}
+                          onSave={(winnerId, ws, ls, sets) => saveScore(a, b, winnerId, ws, ls, sets)}
+                          onClear={m && editable ? () => clearResult(a, b) : undefined}
+                        />
+                      )}
+                    </div>
                   )
                 })}
               </div>
@@ -408,13 +426,14 @@ function RankEditor({ players, standings, editable, busy, onApply }: {
   }
   return (
     <div className="glass overflow-hidden rounded-3xl">
-      <div className="px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-ink-500">Rank the group (1 = top)</div>
+      <div className="px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-ink-500">Rank the group (1 = top) · resulting W–L shown</div>
       <div className="divide-hair">
         {order.map((p, i) => (
           <div key={p.id} className="flex items-center gap-2 px-3 py-2">
             <span className="w-5 text-center text-xs font-bold text-ink-500">{i + 1}</span>
             <Avatar name={p.name} size={24} />
             <span className="min-w-0 flex-1 truncate text-sm font-semibold">{p.name}</span>
+            <span className="font-mono text-[11px] font-semibold" title="Win–loss this order produces"><span className="text-win">{order.length - 1 - i}</span><span className="text-ink-600">–</span><span className="text-loss">{i}</span></span>
             <div className="flex items-center gap-0.5">
               <button disabled={!editable || i === 0} onClick={() => move(i, -1)} className="tap grid h-7 w-7 place-items-center rounded-lg text-ink-400 hover:bg-white/10 hover:text-white disabled:opacity-20">▲</button>
               <button disabled={!editable || i === order.length - 1} onClick={() => move(i, 1)} className="tap grid h-7 w-7 place-items-center rounded-lg text-ink-400 hover:bg-white/10 hover:text-white disabled:opacity-20">▼</button>
