@@ -106,7 +106,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
               <input
                 ref={fileRef}
                 type="file"
@@ -117,7 +117,8 @@ export default function App() {
               <button
                 onClick={doExport}
                 disabled={isEmpty || busy}
-                className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white disabled:opacity-30"
+                aria-label="Download a full backup"
+                className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
                 title="Download a full JSON backup"
               >
                 ⬇ Backup
@@ -125,7 +126,8 @@ export default function App() {
               <button
                 onClick={() => fileRef.current?.click()}
                 disabled={busy}
-                className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white disabled:opacity-30"
+                aria-label="Restore from a backup file"
+                className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
                 title="Restore from a JSON backup (replaces all data)"
               >
                 ⬆
@@ -133,7 +135,8 @@ export default function App() {
               <button
                 onClick={() => run(store.reseedMock)}
                 disabled={busy}
-                className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white disabled:opacity-40"
+                aria-label={isEmpty ? 'Load the sample roster' : 'Reset to the sample roster'}
+                className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                 title="Replace data with the sample roster"
               >
                 {busy ? '…' : isEmpty ? '＋ Sample' : '↻ Reset'}
@@ -141,6 +144,7 @@ export default function App() {
               <button
                 onClick={() => setConfirmClear(true)}
                 disabled={isEmpty || busy}
+                aria-label="Delete all data"
                 className="tap rounded-xl px-3 py-2 text-xs font-semibold text-loss ring-1 ring-loss/30 transition hover:bg-loss/10 disabled:cursor-not-allowed disabled:opacity-30"
                 title="Delete all data"
               >

@@ -168,8 +168,8 @@ export function GroupSheet({
               {locked ? '✓ Validated' : 'Validate'}
             </button>
           )}
-          <button onClick={onPrev} disabled={!onPrev} className="glass-soft tap grid h-9 w-9 place-items-center rounded-xl text-ink-300 hover:text-white disabled:opacity-30">‹</button>
-          <button onClick={onNext} disabled={!onNext} className="glass-soft tap grid h-9 w-9 place-items-center rounded-xl text-ink-300 hover:text-white disabled:opacity-30">›</button>
+          <button onClick={onPrev} disabled={!onPrev} aria-label="Previous group" className="glass-soft tap grid h-11 w-11 place-items-center rounded-xl text-lg text-ink-300 hover:text-white disabled:opacity-30 sm:h-9 sm:w-9 sm:text-base">‹</button>
+          <button onClick={onNext} disabled={!onNext} aria-label="Next group" className="glass-soft tap grid h-11 w-11 place-items-center rounded-xl text-lg text-ink-300 hover:text-white disabled:opacity-30 sm:h-9 sm:w-9 sm:text-base">›</button>
         </div>
       </div>
 
@@ -455,9 +455,9 @@ function ScoreEditor({ a, b, multiSet, pointsTo, startScore = 0, busy, initialA,
 function Stepper({ value, onChange }: { value: number; onChange: (v: number) => void }) {
   return (
     <div className="flex items-center justify-center gap-1.5">
-      <button onClick={() => onChange(Math.max(0, value - 1))} className="tap grid h-8 w-8 place-items-center rounded-xl bg-white/8 text-lg font-bold text-ink-400 hover:text-white">−</button>
+      <button onClick={() => onChange(Math.max(0, value - 1))} aria-label="Decrease score" className="tap grid h-10 w-10 place-items-center rounded-xl bg-white/8 text-lg font-bold text-ink-400 hover:text-white sm:h-8 sm:w-8">−</button>
       <span className="w-8 text-center font-mono text-xl font-extrabold tabular-nums">{value}</span>
-      <button onClick={() => onChange(value + 1)} className="tap grid h-8 w-8 place-items-center rounded-xl bg-white/8 text-lg font-bold text-ink-400 hover:text-white">+</button>
+      <button onClick={() => onChange(value + 1)} aria-label="Increase score" className="tap grid h-10 w-10 place-items-center rounded-xl bg-white/8 text-lg font-bold text-ink-400 hover:text-white sm:h-8 sm:w-8">+</button>
     </div>
   )
 }

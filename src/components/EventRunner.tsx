@@ -388,7 +388,7 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
           <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-xl bg-white/5 px-3.5 py-2.5 text-sm font-semibold outline-none ring-1 ring-white/10 focus:ring-brand/60" placeholder="League name (e.g. Thursday Night)" />
           <div>
             <div className="mb-1.5 text-[11px] uppercase tracking-wide text-ink-500">{qualifier ? 'How qualifier groups are formed' : 'First-season split'}</div>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               <MethodCard active={method === 'block'} onClick={() => setMethod('block')} title="By rating" desc={qualifier ? 'Top seeds together.' : 'Top seeds in Div 1.'} icon="📊" />
               <MethodCard active={method === 'snake'} onClick={() => setMethod('snake')} title="Snake" desc="Balanced groups." icon="🐍" />
               <MethodCard active={method === 'pots'} onClick={() => setMethod('pots')} title="Pots" desc="World-Cup draw." icon="🏆" />

@@ -56,7 +56,8 @@ export function PlayerModal({
       >
         <button
           onClick={onClose}
-          className="absolute right-4 top-4 grid h-8 w-8 place-items-center rounded-lg bg-white/10 text-ink-300 hover:text-white"
+          aria-label="Close"
+          className="absolute right-4 top-4 grid h-9 w-9 place-items-center rounded-lg bg-white/10 text-ink-200 hover:bg-white/20 hover:text-white"
         >
           ✕
         </button>

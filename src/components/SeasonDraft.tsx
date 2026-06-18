@@ -304,9 +304,10 @@ function IconBtn({
   return (
     <button
       title={label}
+      aria-label={label}
       onClick={onClick}
       disabled={disabled}
-      className={`tap grid h-7 w-7 place-items-center rounded-lg text-[11px] font-bold disabled:opacity-20 ${
+      className={`tap grid h-9 w-9 place-items-center rounded-lg text-[11px] font-bold disabled:opacity-20 sm:h-7 sm:w-7 ${
         active ? 'bg-brand/25 text-brand-400 ring-1 ring-brand/40' : danger ? 'text-ink-500 hover:bg-loss/15 hover:text-loss' : 'text-ink-400 hover:bg-white/10 hover:text-white'
       }`}
     >

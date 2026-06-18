@@ -97,10 +97,24 @@ body::before {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 .hairline {
-  border-color: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.11) !important;
 }
 .divide-hair > * + * {
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Keyboard focus ring — unlayered so it overrides Tailwind's outline-none for
+   :focus-visible only (mouse clicks stay ring-free, keeping the glass clean). */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible,
+[role='button']:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 12px;
 }
 
 /* interactive press + lift */
