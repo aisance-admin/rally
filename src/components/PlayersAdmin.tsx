@@ -69,8 +69,8 @@ export function PlayersAdmin({ store, onSelect }: { store: Store; onSelect: (id:
                   </div>
                 </button>
                 <span className="font-mono text-sm font-bold text-white">{p.elo}</span>
-                <button onClick={() => setEditing(p)} className="tap grid h-8 w-8 place-items-center rounded-lg text-ink-500 hover:bg-white/10 hover:text-white" title="Edit">✎</button>
-                <button onClick={() => setConfirmDelete(p)} className="tap grid h-8 w-8 place-items-center rounded-lg text-ink-500 hover:bg-loss/15 hover:text-loss" title="Delete">🗑</button>
+                <button onClick={() => setEditing(p)} aria-label={`Edit ${p.name}`} className="tap grid h-9 w-9 place-items-center rounded-lg text-ink-400 hover:bg-white/10 hover:text-white sm:h-8 sm:w-8" title="Edit">✎</button>
+                <button onClick={() => setConfirmDelete(p)} aria-label={`Delete ${p.name}`} className="tap grid h-9 w-9 place-items-center rounded-lg text-ink-400 hover:bg-loss/15 hover:text-loss sm:h-8 sm:w-8" title="Delete">🗑</button>
               </div>
             ))}
           </div>

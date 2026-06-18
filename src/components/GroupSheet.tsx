@@ -344,7 +344,7 @@ function WLRow({ a, b, match, disabled, busy, onPick, onClear }: {
       <button disabled={disabled || busy} onClick={() => onPick(a.id)} className={`${side(aWon)} text-right`}>{a.name}</button>
       <span className="shrink-0 text-[10px] font-bold text-ink-600">v</span>
       <button disabled={disabled || busy} onClick={() => onPick(b.id)} className={side(bWon)}>{b.name}</button>
-      <button onClick={onClear} disabled={!match || disabled || busy} title="Clear result" className="tap shrink-0 grid h-7 w-7 place-items-center rounded-lg text-ink-600 hover:text-loss disabled:opacity-0">✕</button>
+      <button onClick={onClear} disabled={!match || disabled || busy} title="Clear result" aria-label="Clear result" className="tap shrink-0 grid h-9 w-9 place-items-center rounded-lg text-ink-500 hover:text-loss disabled:opacity-0 sm:h-7 sm:w-7">✕</button>
     </div>
   )
 }
@@ -367,7 +367,7 @@ function ScoreRow({ a, b, match, multiSet, pointsTo, startScore = 0, disabled, b
         <span className="font-mono font-bold">{aScore}</span><span className="text-ink-600">:</span><span className="font-mono font-bold">{bScore}</span>
         <span className={`flex-1 truncate ${!aWon ? 'font-bold' : 'text-ink-500'}`}>{b.name}</span>
         {!disabled && <button onClick={() => setOpen(true)} className="tap text-[11px] font-semibold text-brand-400">edit</button>}
-        {onClear && <button onClick={onClear} title="Delete result" className="tap text-ink-600 hover:text-loss">✕</button>}
+        {onClear && <button onClick={onClear} title="Delete result" aria-label="Delete result" className="tap text-ink-500 hover:text-loss">✕</button>}
       </div>
     )
   }

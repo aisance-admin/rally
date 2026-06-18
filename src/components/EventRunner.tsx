@@ -751,7 +751,7 @@ function LeagueCard({ league, matches, readOnly, locked, isGroup, prevRecords, p
               </span>
             </button>
             <span className="pr-1 text-right font-mono text-xs"><span className="text-win">{s.wins}</span><span className="text-ink-600">–</span><span className="text-loss">{s.played - s.wins}</span></span>
-            <button onClick={() => setExplainId(s.player.id)} title="Why this rank?" className="tap grid h-6 w-6 place-items-center rounded-lg text-ink-600 hover:bg-white/10 hover:text-white">ⓘ</button>
+            <button onClick={() => setExplainId(s.player.id)} title="Why this rank?" aria-label={`Why is ${s.player.name} ranked here?`} className="tap grid h-9 w-9 place-items-center rounded-lg text-ink-400 hover:bg-white/10 hover:text-white sm:h-6 sm:w-6">ⓘ</button>
           </div>
         ))}
       </div>
