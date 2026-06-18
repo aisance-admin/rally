@@ -417,7 +417,14 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
             <NumControl label={qualifier ? 'Groups' : 'Divisions'} value={divisions} min={1} max={maxDiv} onChange={setNumDiv} />
             <NumControl label={`Players / ${qualifier ? 'group' : 'division'}`} value={perDiv} min={2} max={Math.max(2, count)} onChange={setPerDiv} />
           </div>
-          <p className="text-[11px] text-ink-500">{count} playing → sizes <span className="font-mono text-ink-300">{sizes.join(' · ') || '—'}</span> <span className="text-ink-600">(max {maxDiv})</span></p>
+          {sizes.length > 0 ? (
+            <div className="space-y-0.5">
+              <p className="text-[11px] text-ink-400">{count} playing → <span className="font-semibold text-ink-200">{describeSizes(sizes, qualifier ? 'group' : 'division')}</span> <span className="text-ink-600">· everyone plays</span></p>
+              <p className="text-[11px] text-ink-500">Sizes <span className="font-mono text-ink-300">{sizes.join(' · ')}</span> <span className="text-ink-600">(max {maxDiv})</span>{sizeNote(sizes)}</p>
+            </div>
+          ) : (
+            <p className="text-[11px] text-ink-500">Check in players to preview the split.</p>
+          )}
         </div>
 
         <div className="glass overflow-hidden rounded-3xl">
@@ -841,6 +848,26 @@ function computeStandings(league: LeagueWithPlayers, matches: Match[]): RankedPl
 function ordinal(n: number): string {
   const s = ['th', 'st', 'nd', 'rd'], v = n % 100
   return n + (s[(v - 20) % 10] ?? s[v] ?? s[0])
+}
+
+/** Human-readable split proposal: [5,5,4,4] → "two divisions of 5 + two divisions of 4". */
+function describeSizes(sizes: number[], unit: string): string {
+  const words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']
+  const w = (n: number) => words[n] ?? String(n)
+  const counts = new Map<number, number>()
+  for (const s of sizes) counts.set(s, (counts.get(s) ?? 0) + 1)
+  return [...counts.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([size, n]) => `${w(n)} ${unit}${n === 1 ? '' : 's'} of ${size}`)
+    .join(' + ')
+}
+
+/** §1 reassurance: when sizes are mixed, explain rounds parity / handicap. */
+function sizeNote(sizes: number[]): string {
+  const notes: string[] = []
+  if (sizes.includes(3) && sizes.includes(4)) notes.push('groups of 3 and 4 play the same number of rounds')
+  if (sizes.some((s) => s >= 5)) notes.push('larger groups get a head-start handicap so all finish together')
+  return notes.length ? ` — ${notes.join('; ')}` : ''
 }
 
 // ───────────────────────── small UI ─────────────────────────
