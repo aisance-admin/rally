@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { motion, useReducedMotion } from 'framer-motion'
 import type { Player } from '../types'
 import type { Store } from '../lib/store'
 import {
@@ -27,6 +28,7 @@ export function DivisionDraft({
   note,
   createOpts,
   startLabel,
+  reveal,
   onStarted,
   onCancel,
 }: {
@@ -42,6 +44,7 @@ export function DivisionDraft({
   note?: React.ReactNode
   createOpts?: CreateSeasonOpts
   startLabel?: string
+  reveal?: number // changes on a fresh draw (pots/random) → replays the staggered card reveal
   onStarted: (id: string) => void
   onCancel: () => void
 }) {
@@ -49,6 +52,7 @@ export function DivisionDraft({
   const [busy, setBusy] = useState(false)
   const [replacing, setReplacing] = useState<{ div: number; id: string } | null>(null)
   const [benchQ, setBenchQ] = useState('')
+  const reduceMotion = useReducedMotion()
   const showRecord = !!prevRecords
 
   // Re-seed when the parent recomputes the layout (reshuffle / promote count).
@@ -188,8 +192,15 @@ export function DivisionDraft({
             <div className="divide-hair">
               {d.players.map((raw, pos) => {
                 const p = fresh(raw)
+                const anim = reveal != null && !reduceMotion
                 return (
-                  <div key={p.id} className="flex items-center gap-2 px-3 py-2">
+                  <motion.div
+                    key={`${reveal ?? 'static'}-${p.id}`}
+                    initial={anim ? { opacity: 0, y: 12, scale: 0.94 } : false}
+                    animate={anim ? { opacity: 1, y: 0, scale: 1 } : undefined}
+                    transition={anim ? { delay: i * 0.07 + pos * 0.045, type: 'spring', stiffness: 420, damping: 28 } : undefined}
+                    className="flex items-center gap-2 px-3 py-2"
+                  >
                     <span className="w-4 text-center text-xs font-bold text-ink-500">{pos + 1}</span>
                     <SkillBadge elo={p.elo} size="sm" />
                     <Avatar name={p.name} size={26} />
@@ -201,7 +212,7 @@ export function DivisionDraft({
                       <IconBtn label="Replace with a benched player" onClick={() => setReplacing(replacing?.id === p.id ? null : { div: i, id: p.id })} active={replacing?.id === p.id}>⇄</IconBtn>
                       <IconBtn label="Sit out this season" onClick={() => drop(i, p.id)} danger>✕</IconBtn>
                     </div>
-                  </div>
+                  </motion.div>
                 )
               })}
               {d.players.length === 0 && <div className="px-4 py-5 text-center text-xs text-ink-500">empty</div>}

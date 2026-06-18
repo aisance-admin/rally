@@ -150,6 +150,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
           createOpts={{ status: 'qualifying', format }}
           note={<>Everyone plays these groups first. Their finishing position decides which division they start in. {firstMethod === 'manual' ? 'Add players to each group below.' : firstMethod === 'pots' ? 'Drawn from seeded pots.' : 'Move anyone with ▲▼.'}</>}
           controls={formatControls(true)}
+          reveal={firstMethod === 'pots' || firstMethod === 'random' ? reseed : undefined}
           onStarted={(id) => openSeason(id)}
           onCancel={backToHub}
         />
@@ -175,6 +176,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
             ? <>Divisions built from the qualifier results. Adjust anyone with ▲▼ before you start.</>
             : <>Players are split {firstMethod === 'random' ? 'randomly' : firstMethod === 'manual' ? 'by you' : firstMethod === 'snake' ? 'snake-style for balanced groups' : firstMethod === 'pots' ? 'from seeded pots' : 'by rating'}. Move anyone with ▲▼, sit them out with ✕, or add benched players below.</>}
           controls={fromQual ? <FormatControl value={format} onChange={setFormat} /> : formatControls(true)}
+          reveal={!fromQual && (firstMethod === 'pots' || firstMethod === 'random') ? reseed : undefined}
           onStarted={async (id) => {
             if (qualEventId) { await finishEvent(qualEventId); setQualEventId(null); await store.refresh() }
             setBuiltDivisions(null); setFirstCfg(null); openSeason(id)
