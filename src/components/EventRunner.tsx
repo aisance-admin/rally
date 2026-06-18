@@ -1,10 +1,11 @@
 import { useMemo, useRef, useState } from 'react'
+import { Reorder } from 'framer-motion'
 import type { EventDetail, LeagueWithPlayers, Match, Player } from '../types'
 import type { MatchOpResult } from '../lib/api'
 import type { Store } from '../lib/store'
 import { manualSizes, roundRobin } from '../lib/planner'
 import { deleteEvent, fetchEventDetail, finishEvent, reopenEvent } from '../lib/events'
-import { Avatar } from './bits'
+import { Avatar, nameMatches, SearchInput } from './bits'
 import { SkillBadge } from './SkillBadge'
 import { Modal } from './Modal'
 import { DivisionDraft } from './SeasonDraft'
@@ -15,6 +16,7 @@ import {
   DEFAULT_PROMOTION,
   defaultQualifierMapping,
   type DraftDivision,
+  explainPlacement,
   type FormationMode,
   generateNextSeasonDivisions,
   groupSeries,
@@ -52,7 +54,9 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
   const [prevTiers, setPrevTiers] = useState<Map<string, number> | null>(null)
 
   const [firstCfg, setFirstCfg] = useState<FirstCfg | null>(null)
-  const [firstMethod, setFirstMethod] = useState<FormationMode>('elo')
+  const [firstMethod, setFirstMethod] = useState<FormationMode>('block')
+  const [seedOrder, setSeedOrder] = useState<Player[]>([])
+  const [seedEditorOpen, setSeedEditorOpen] = useState(false)
   const [format, setFormat] = useState('1 set to 11')
   const [reseed, setReseed] = useState(0)
   const [draftPrev, setDraftPrev] = useState<EventDetail | null>(null)
@@ -94,8 +98,9 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
 
   const firstDivisions = useMemo(() => {
     if (builtDivisions) return builtDivisions
-    return firstCfg ? buildInitialDivisions(firstCfg.players, firstCfg.divisions, firstMethod) : []
-  }, [firstCfg, firstMethod, reseed, builtDivisions])
+    if (!firstCfg) return []
+    return applyHandicaps(buildInitialDivisions(seedOrder.length ? seedOrder : firstCfg.players, firstCfg.divisions, firstMethod, { reseed }))
+  }, [firstCfg, firstMethod, reseed, builtDivisions, seedOrder])
   const nextDivisions = useMemo(() => (draftPrev ? generateNextSeasonDivisions(draftPrev, promotionCfg) : []), [draftPrev, promotionCfg])
   const nextRecords = useMemo(() => (draftPrev ? seasonRecordsFor(draftPrev) : null), [draftPrev])
   const nextPreview = useMemo(() => {
@@ -108,11 +113,13 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
   const openSeries = openId ? series.find((s) => s.seasons.some((x) => x.id === openId)) : null
   const isLatestDone = !!(openSeries && detail && openSeries.seasons[openSeries.seasons.length - 1].id === openId && detail.event.status === 'done')
 
+  const seeded = firstMethod === 'block' || firstMethod === 'snake' || firstMethod === 'pots'
   const formatControls = (withReshuffle: boolean) => (
     <div className="flex flex-wrap items-center gap-1.5">
-      <Seg value={firstMethod} onChange={setFirstMethod} options={[['elo', 'By rating'], ['random', 'Random'], ['manual', 'Manual']]} />
+      <Seg value={firstMethod} onChange={setFirstMethod} options={[['block', 'By rating'], ['snake', 'Snake'], ['pots', 'Pots'], ['random', 'Random'], ['manual', 'Manual']]} />
       <FormatControl value={format} onChange={setFormat} />
-      {withReshuffle && firstMethod === 'random' && (
+      {seeded && <button onClick={() => setSeedEditorOpen(true)} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white" title="Reorder the seed list (1 = strongest)">⇅ Seed order</button>}
+      {withReshuffle && (firstMethod === 'random' || firstMethod === 'pots') && (
         <button onClick={() => setReseed((r) => r + 1)} className="glass-soft tap rounded-xl px-3 py-2 text-xs font-semibold text-ink-300 hover:text-white">🎲 Reshuffle</button>
       )}
     </div>
@@ -122,7 +129,7 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
     return (
       <Setup
         store={store}
-        onConfigured={(cfg, method, fmt) => { setFirstCfg(cfg); setFirstMethod(method); setFormat(fmt); setBuiltDivisions(null); setQualEventId(null); setView(cfg.qualifier ? 'qualDraft' : 'draft') }}
+        onConfigured={(cfg, method, fmt) => { setFirstCfg(cfg); setFirstMethod(method); setFormat(fmt); setSeedOrder([...cfg.players].sort((a, b) => b.elo - a.elo)); setBuiltDivisions(null); setQualEventId(null); setView(cfg.qualifier ? 'qualDraft' : 'draft') }}
         onCancel={backToHub}
       />
     )
@@ -131,20 +138,23 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
   // qualifier seeding round — form the qualification groups
   if (view === 'qualDraft' && firstCfg) {
     return (
-      <DivisionDraft
-        store={store}
-        seriesId={firstCfg.seriesId}
-        seriesName={firstCfg.name}
-        season={0}
-        initialDivisions={firstDivisions}
-        subtitle="Qualifier · seeding groups"
-        startLabel="Start qualifier"
-        createOpts={{ status: 'qualifying', format }}
-        note={<>Everyone plays these groups first. Their finishing position decides which division they start in. {firstMethod === 'manual' ? 'Add players to each group below.' : 'Move anyone with ▲▼.'}</>}
-        controls={formatControls(true)}
-        onStarted={(id) => openSeason(id)}
-        onCancel={backToHub}
-      />
+      <>
+        <DivisionDraft
+          store={store}
+          seriesId={firstCfg.seriesId}
+          seriesName={firstCfg.name}
+          season={0}
+          initialDivisions={firstDivisions}
+          subtitle="Qualifier · seeding groups"
+          startLabel="Start qualifier"
+          createOpts={{ status: 'qualifying', format }}
+          note={<>Everyone plays these groups first. Their finishing position decides which division they start in. {firstMethod === 'manual' ? 'Add players to each group below.' : firstMethod === 'pots' ? 'Drawn from seeded pots.' : 'Move anyone with ▲▼.'}</>}
+          controls={formatControls(true)}
+          onStarted={(id) => openSeason(id)}
+          onCancel={backToHub}
+        />
+        {seedEditorOpen && <SeedListModal order={seedOrder} onChange={setSeedOrder} onClose={() => setSeedEditorOpen(false)} />}
+      </>
     )
   }
 
@@ -152,24 +162,27 @@ export function EventRunner({ store, onSelect }: { store: Store; onSelect: (id: 
   if (view === 'draft' && firstCfg) {
     const fromQual = !!builtDivisions
     return (
-      <DivisionDraft
-        store={store}
-        seriesId={firstCfg.seriesId}
-        seriesName={firstCfg.name}
-        season={1}
-        initialDivisions={firstDivisions}
-        subtitle={fromQual ? 'Season 1 · seeded from qualifier' : firstMethod === 'random' ? 'First season · random split' : firstMethod === 'manual' ? 'First season · place players by hand' : 'First season · seeded by rating'}
-        createOpts={{ status: 'live', format }}
-        note={fromQual
-          ? <>Divisions built from the qualifier results. Adjust anyone with ▲▼ before you start.</>
-          : <>Players are split {firstMethod === 'random' ? 'randomly' : firstMethod === 'manual' ? 'by you' : 'by rating'}. Move anyone with ▲▼, sit them out with ✕, or add benched players below.</>}
-        controls={fromQual ? <FormatControl value={format} onChange={setFormat} /> : formatControls(true)}
-        onStarted={async (id) => {
-          if (qualEventId) { await finishEvent(qualEventId); setQualEventId(null); await store.refresh() }
-          setBuiltDivisions(null); setFirstCfg(null); openSeason(id)
-        }}
-        onCancel={backToHub}
-      />
+      <>
+        <DivisionDraft
+          store={store}
+          seriesId={firstCfg.seriesId}
+          seriesName={firstCfg.name}
+          season={1}
+          initialDivisions={firstDivisions}
+          subtitle={fromQual ? 'Season 1 · seeded from qualifier' : firstMethod === 'random' ? 'First season · random split' : firstMethod === 'manual' ? 'First season · place players by hand' : firstMethod === 'snake' ? 'First season · snake seeding' : firstMethod === 'pots' ? 'First season · seeded pots' : 'First season · seeded by rating'}
+          createOpts={{ status: 'live', format }}
+          note={fromQual
+            ? <>Divisions built from the qualifier results. Adjust anyone with ▲▼ before you start.</>
+            : <>Players are split {firstMethod === 'random' ? 'randomly' : firstMethod === 'manual' ? 'by you' : firstMethod === 'snake' ? 'snake-style for balanced groups' : firstMethod === 'pots' ? 'from seeded pots' : 'by rating'}. Move anyone with ▲▼, sit them out with ✕, or add benched players below.</>}
+          controls={fromQual ? <FormatControl value={format} onChange={setFormat} /> : formatControls(true)}
+          onStarted={async (id) => {
+            if (qualEventId) { await finishEvent(qualEventId); setQualEventId(null); await store.refresh() }
+            setBuiltDivisions(null); setFirstCfg(null); openSeason(id)
+          }}
+          onCancel={backToHub}
+        />
+        {seedEditorOpen && <SeedListModal order={seedOrder} onChange={setSeedOrder} onClose={() => setSeedEditorOpen(false)} />}
+      </>
     )
   }
 
@@ -334,13 +347,14 @@ function StatusPill({ status }: { status: string }) {
 
 function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: (cfg: FirstCfg, method: FormationMode, format: string) => void; onCancel?: () => void }) {
   const [name, setName] = useState('League Night')
-  const [method, setMethod] = useState<FormationMode>('elo')
+  const [method, setMethod] = useState<FormationMode>('block')
   const [format, setFormat] = useState('1 set to 11')
   const [qualifier, setQualifier] = useState(false)
   const [unchecked, setUnchecked] = useState<Set<string>>(() => new Set())
   const [numDiv, setNumDiv] = useState(4)
 
   const roster = useMemo(() => [...store.players].sort((a, b) => b.elo - a.elo), [store.players])
+  const [rosterQ, setRosterQ] = useState('')
   const isIn = (id: string) => !unchecked.has(id)
   const count = roster.filter((p) => isIn(p.id)).length
 
@@ -373,8 +387,10 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
           <div>
             <div className="mb-1.5 text-[11px] uppercase tracking-wide text-ink-500">{qualifier ? 'How qualifier groups are formed' : 'First-season split'}</div>
             <div className="grid grid-cols-3 gap-2">
-              <MethodCard active={method === 'elo'} onClick={() => setMethod('elo')} title="By rating" desc="Seed strongest first." icon="📊" />
-              <MethodCard active={method === 'random'} onClick={() => setMethod('random')} title="Random" desc="Shuffle players." icon="🎲" />
+              <MethodCard active={method === 'block'} onClick={() => setMethod('block')} title="By rating" desc={qualifier ? 'Top seeds together.' : 'Top seeds in Div 1.'} icon="📊" />
+              <MethodCard active={method === 'snake'} onClick={() => setMethod('snake')} title="Snake" desc="Balanced groups." icon="🐍" />
+              <MethodCard active={method === 'pots'} onClick={() => setMethod('pots')} title="Pots" desc="World-Cup draw." icon="🏆" />
+              <MethodCard active={method === 'random'} onClick={() => setMethod('random')} title="Random" desc="Shuffle everyone." icon="🎲" />
               <MethodCard active={method === 'manual'} onClick={() => setMethod('manual')} title="Manual" desc="Place by hand." icon="✋" />
             </div>
           </div>
@@ -410,8 +426,9 @@ function Setup({ store, onConfigured, onCancel }: { store: Store; onConfigured: 
               <button onClick={() => setUnchecked(new Set(roster.map((p) => p.id)))} className="rounded-lg bg-white/8 px-2 py-1 text-[11px] font-semibold tap">None</button>
             </div>
           </div>
+          <div className="px-3 pb-2"><SearchInput value={rosterQ} onChange={setRosterQ} placeholder="Find a player…" /></div>
           <div className="divide-hair max-h-[320px] overflow-y-auto">
-            {roster.map((p) => {
+            {roster.filter((p) => nameMatches(p, rosterQ)).map((p) => {
               const on = isIn(p.id)
               return (
                 <button key={p.id} onClick={() => toggle(p.id)} className="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors hover:bg-white/5">
@@ -495,7 +512,7 @@ function MappingEditor({ qual, mapping, onChange, split, onSplitChange, onBuild,
       {anySplit && (
         <div className="glass-soft flex flex-wrap items-center gap-2 rounded-2xl px-4 py-2.5">
           <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">When one position feeds several divisions, split by</span>
-          <Seg value={split} onChange={onSplitChange} options={[['random', 'Random'], ['points', 'By points'], ['rating', 'By rating']]} />
+          <Seg value={split} onChange={onSplitChange} options={[['random', 'Random'], ['points', 'By points'], ['seed', 'By seed']]} />
         </div>
       )}
 
@@ -573,6 +590,7 @@ function SeasonView({ store, detail, loading, readOnly, canStartNext, prevRecord
     const idx = leagues.findIndex((l) => l.id === active.id)
     return (
       <GroupSheet
+        key={active.id}
         league={active}
         matches={matches}
         readOnly={readOnly}
@@ -690,6 +708,7 @@ function LeagueCard({ league, matches, readOnly, locked, isGroup, prevRecords, p
   const fx = fixtures(league)
   const played = fx.filter((f) => findMatch(matches, f[0].id, f[1].id)).length
   const standings = computeStandings(league, matches)
+  const [explainId, setExplainId] = useState<string | null>(null)
 
   return (
     <div className="glass overflow-hidden rounded-3xl lift">
@@ -704,13 +723,13 @@ function LeagueCard({ league, matches, readOnly, locked, isGroup, prevRecords, p
       </div>
 
       <div className="px-2 py-1">
-        <div className="grid grid-cols-[20px_1fr_28px_28px_36px] gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
-          <span></span><span>Player</span><span className="text-center">P</span><span className="text-center">W</span><span className="text-right">+/-</span>
+        <div className="grid grid-cols-[20px_1fr_auto_22px] gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
+          <span></span><span>Player</span><span className="pr-1 text-right">W–L</span><span></span>
         </div>
         {standings.map((s, i) => (
-          <button key={s.player.id} onClick={() => onSelect(s.player.id)} className="tap grid w-full grid-cols-[20px_1fr_28px_28px_36px] items-center gap-1 rounded-xl px-2 py-1.5 text-left text-sm hover:bg-white/5">
+          <div key={s.player.id} className="grid grid-cols-[20px_1fr_auto_22px] items-center gap-1 rounded-xl px-2 text-sm hover:bg-white/5">
             <span className="text-center text-xs font-bold text-ink-500">{i + 1}</span>
-            <span className="flex min-w-0 items-center gap-2">
+            <button onClick={() => onSelect(s.player.id)} className="tap flex min-w-0 items-center gap-2 py-1.5 text-left">
               <Avatar name={s.player.name} size={22} />
               <span className="min-w-0 leading-tight">
                 <span className="flex items-center gap-1 truncate font-semibold">{s.player.name} <TieChip reason={s.reason} /></span>
@@ -721,11 +740,10 @@ function LeagueCard({ league, matches, readOnly, locked, isGroup, prevRecords, p
                   </span>
                 )}
               </span>
-            </span>
-            <span className="text-center font-mono text-xs text-ink-500">{s.played}</span>
-            <span className="text-center font-mono text-xs text-win">{s.wins}</span>
-            <span className="text-right font-mono text-xs" style={{ color: s.pointDiff > 0 ? '#34d399' : s.pointDiff < 0 ? '#fb6f7d' : '#7c8696' }}>{s.pointDiff > 0 ? '+' : ''}{s.pointDiff}</span>
-          </button>
+            </button>
+            <span className="pr-1 text-right font-mono text-xs"><span className="text-win">{s.wins}</span><span className="text-ink-600">–</span><span className="text-loss">{s.played - s.wins}</span></span>
+            <button onClick={() => setExplainId(s.player.id)} title="Why this rank?" className="tap grid h-6 w-6 place-items-center rounded-lg text-ink-600 hover:bg-white/10 hover:text-white">ⓘ</button>
+          </div>
         ))}
       </div>
 
@@ -734,7 +752,62 @@ function LeagueCard({ league, matches, readOnly, locked, isGroup, prevRecords, p
           {readOnly ? `View ${isGroup ? 'group' : 'results'}` : played < fx.length ? `Enter results · ${played}/${fx.length}` : 'Review results'} →
         </button>
       </div>
+
+      {explainId && (
+        <Modal onClose={() => setExplainId(null)}>
+          <div className="px-5 py-5">
+            <div className="mb-2 flex items-center gap-2">
+              <Avatar name={standings.find((s) => s.player.id === explainId)?.player.name ?? ''} size={32} />
+              <h3 className="text-lg font-bold">{standings.find((s) => s.player.id === explainId)?.player.name}</h3>
+            </div>
+            <p className="text-sm leading-relaxed text-ink-300">{explainPlacement(explainId, standings, matches)}</p>
+          </div>
+          <div className="border-t hairline px-5 py-4">
+            <button onClick={() => setExplainId(null)} className="glass-soft tap w-full rounded-xl py-2.5 text-sm font-semibold text-ink-300">Got it</button>
+          </div>
+        </Modal>
+      )}
     </div>
+  )
+}
+
+/** Auto-suggest a per-group handicap: oversized groups start ahead by (size − smallest). */
+function applyHandicaps(divs: DraftDivision[]): DraftDivision[] {
+  const sizes = divs.map((d) => d.players.length).filter((n) => n > 0)
+  if (!sizes.length) return divs
+  const min = Math.min(...sizes)
+  return divs.map((d) => ({ ...d, startScore: Math.max(0, d.players.length - min) }))
+}
+
+/** Drag-to-reorder seed list (1 = strongest), search-assisted. Feeds snake/pots/block. */
+function SeedListModal({ order, onChange, onClose }: { order: Player[]; onChange: (o: Player[]) => void; onClose: () => void }) {
+  const [q, setQ] = useState('')
+  const ql = q.trim().toLowerCase()
+  return (
+    <Modal onClose={onClose} wide>
+      <div className="px-5 pb-2 pt-5">
+        <h3 className="text-lg font-bold">Seed order</h3>
+        <p className="mt-0.5 text-xs text-ink-500">Drag to reorder — 1 = strongest. Snake, pots, and by-rating seeding use this order.</p>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find a player…" className="mt-3 w-full rounded-xl bg-white/5 px-3.5 py-2 text-sm outline-none ring-1 ring-white/10 focus:ring-brand/60" />
+      </div>
+      <Reorder.Group axis="y" values={order} onReorder={onChange} className="max-h-[55vh] space-y-1 overflow-y-auto px-3 pb-3">
+        {order.map((p, i) => {
+          const dim = !!ql && !`${p.name} ${p.handle}`.toLowerCase().includes(ql)
+          return (
+            <Reorder.Item key={p.id} value={p} style={{ opacity: dim ? 0.3 : 1 }} className="flex cursor-grab items-center gap-2 rounded-xl bg-white/[0.05] px-3 py-2 ring-1 ring-white/8 active:cursor-grabbing">
+              <span className="w-5 text-center font-mono text-xs font-bold text-ink-500">{i + 1}</span>
+              <span className="text-ink-600">⋮⋮</span>
+              <Avatar name={p.name} size={24} />
+              <span className="min-w-0 flex-1 truncate text-sm font-semibold">{p.name}</span>
+              <SkillBadge elo={p.elo} size="sm" />
+            </Reorder.Item>
+          )
+        })}
+      </Reorder.Group>
+      <div className="border-t hairline px-5 py-4">
+        <button onClick={onClose} className="tap w-full rounded-xl bg-gradient-to-br from-brand to-brand2 py-2.5 text-sm font-bold text-white glow-brand">Done</button>
+      </div>
+    </Modal>
   )
 }
 

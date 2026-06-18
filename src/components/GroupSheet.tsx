@@ -1,9 +1,10 @@
 import { useMemo, useRef, useState } from 'react'
+import { motion } from 'framer-motion'
 import type { LeagueWithPlayers, Match, Player, SetScore } from '../types'
 import type { Store } from '../lib/store'
 import type { MatchOpResult } from '../lib/api'
 import { roundRobin } from '../lib/planner'
-import { parseFormat, rankDivision, type RankedPlayer, type TieReason, type WL } from '../lib/seasons'
+import { explainPlacement, parseFormat, rankDivision, type RankedPlayer, type TieReason, type WL } from '../lib/seasons'
 import { Avatar } from './bits'
 import { Modal } from './Modal'
 
@@ -56,6 +57,7 @@ export function GroupSheet({
   })
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [pendingMode, setPendingMode] = useState<Mode | null>(null)
+  const [explainId, setExplainId] = useState<string | null>(null)
 
   // Warn before switching to a less-detailed mode than the data already entered (spec §4).
   const levelOf = (s: Match['status']) => (s === 'final' ? 2 : s === 'wl' ? 1 : 0)
@@ -72,6 +74,25 @@ export function GroupSheet({
   )
   const played = groupMatches.length
   const tiedNeedingPts = standings.filter((s) => s.reason === 'needs-pts').map((s) => s.player)
+  const tiedNeedingDraw = standings.filter((s) => s.reason === 'draw-needed').map((s) => s.player)
+
+  // Confirmed random draw (spec §2 step 4): shuffle the tied players, then write their
+  // head-to-head as rank rows (round=1 = "decided by draw") so the order is stable and marked.
+  const rankRandomly = async (tied: Player[]) => {
+    if (busyKey || tied.length < 2) return
+    setBusyKey('draw')
+    try {
+      const order = [...tied]
+      for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]] }
+      for (let i = 0; i < order.length; i++)
+        for (let j = i + 1; j < order.length; j++) {
+          const a = order[i], b = order[j]
+          const existing = findMatch(matches, a.id, b.id)
+          const res = await store.recordMatch({ matchId: existing?.id, winnerId: a.id, loserId: b.id, winnerScore: 1, loserScore: 0, status: 'rank', round: 1, format: league.format, eventId, leagueId: league.id })
+          onMatchOp(res)
+        }
+    } finally { setBusyKey(null) }
+  }
 
   const rowRefs = useRef<Record<string, HTMLElement | null>>({})
   // After a save, bring the next unentered match into view (spec §3b).
@@ -132,6 +153,7 @@ export function GroupSheet({
               <span className="h-2.5 w-2.5 rounded-full" style={{ background: league.color, boxShadow: `0 0 12px ${league.color}` }} />
               <span className="truncate text-lg font-extrabold">{league.name}</span>
               <span className="rounded-md bg-white/8 px-1.5 py-0.5 text-[11px] font-bold text-ink-300">{league.format}</span>
+              {league.startScore > 0 && <span className="rounded-md bg-brand/15 px-1.5 py-0.5 text-[11px] font-bold text-brand-400" title="This group is handicapped — matches start from this score">start {league.startScore}–{league.startScore}</span>}
             </div>
             <div className="mt-1 text-xs text-ink-500">Group {index} of {total} · {played}/{fx.length} played</div>
           </div>
@@ -156,20 +178,18 @@ export function GroupSheet({
         <div className="glass h-fit overflow-hidden rounded-3xl">
           <div className="px-4 py-3 text-sm font-bold" style={{ background: `linear-gradient(90deg, ${league.color}26, transparent)` }}>Standings</div>
           <div className="px-2 py-1">
-            <div className="grid grid-cols-[20px_1fr_26px_26px_34px] gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
-              <span></span><span>Player</span><span className="text-center">P</span><span className="text-center">W</span><span className="text-right">+/-</span>
+            <div className="grid grid-cols-[20px_1fr_auto] gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
+              <span></span><span>Player</span><span className="pr-1 text-right">W–L</span>
             </div>
             {standings.map((s, i) => (
-              <div key={s.player.id} className="grid grid-cols-[20px_1fr_26px_26px_34px] items-center gap-1 rounded-xl px-2 py-1.5 text-sm">
+              <motion.button layout transition={{ type: 'spring', stiffness: 500, damping: 40 }} key={s.player.id} onClick={() => setExplainId(s.player.id)} title="Why this rank?" className="tap grid w-full grid-cols-[20px_1fr_auto] items-center gap-1 rounded-xl px-2 py-1.5 text-left text-sm hover:bg-white/5">
                 <span className="text-center text-xs font-bold text-ink-500">{i + 1}</span>
                 <span className="flex min-w-0 items-center gap-1.5">
                   <Avatar name={s.player.name} size={20} />
                   <span className="flex items-center gap-1 truncate font-semibold">{s.player.name} <TieChip reason={s.reason} /></span>
                 </span>
-                <span className="text-center font-mono text-xs text-ink-500">{s.played}</span>
-                <span className="text-center font-mono text-xs text-win">{s.wins}</span>
-                <span className="text-right font-mono text-xs" style={{ color: s.pointDiff > 0 ? '#34d399' : s.pointDiff < 0 ? '#fb6f7d' : '#7c8696' }}>{s.pointDiff > 0 ? '+' : ''}{s.pointDiff}</span>
-              </div>
+                <span className="pr-1 text-right font-mono text-xs"><span className="text-win">{s.wins}</span><span className="text-ink-600">–</span><span className="text-loss">{s.played - s.wins}</span></span>
+              </motion.button>
             ))}
           </div>
         </div>
@@ -185,26 +205,38 @@ export function GroupSheet({
             </div>
           )}
 
-          {/* circular-tie auto-prompt: the one place points are needed */}
+          {/* circular tie in Win/Loss mode: offer BOTH — enter scores, or draw (spec §4 + step 4) */}
           {tiedNeedingPts.length >= 2 && editable && (
             <div className="rounded-2xl bg-loss/10 p-3 ring-1 ring-loss/30">
               <div className="mb-2 flex items-center gap-2 text-sm font-bold text-loss">
                 <span>⚖️ {tiedNeedingPts.length} players finished level</span>
               </div>
-              <p className="mb-2 text-[11px] text-ink-400">They have equal wins and beat each other in a circle — enter the scores of just their matches to rank them.</p>
+              <p className="mb-2 text-[11px] text-ink-400">Equal wins and they beat each other in a circle. Enter the scores of just their matches to rank them — or rank them with a random draw.</p>
               <div className="space-y-2">
                 {pairsWithin(tiedNeedingPts).map(([a, b]) => {
                   const m = findMatch(matches, a.id, b.id)
                   return (
                     <ScoreRow
                       key={`tie:${a.id}:${b.id}`}
-                      a={a} b={b} match={m} multiSet={multiSet} pointsTo={fmt.pointsTo}
+                      a={a} b={b} match={m} multiSet={multiSet} pointsTo={fmt.pointsTo} startScore={league.startScore}
                       busy={busyKey === `${a.id}:${b.id}`} highlight
                       onSave={(winnerId, ws, ls, sets) => saveScore(a, b, winnerId, ws, ls, sets)}
                     />
                   )
                 })}
               </div>
+              <button onClick={() => rankRandomly(tiedNeedingPts)} disabled={!!busyKey} className="tap mt-2 w-full rounded-xl bg-white/10 py-2 text-xs font-bold text-ink-200 hover:bg-white/15 disabled:opacity-40">{busyKey === 'draw' ? 'Drawing…' : '🎲 Rank randomly instead'}</button>
+            </div>
+          )}
+
+          {/* total equality (even with scores): explicit organizer-confirmed random draw (spec §2 step 4) */}
+          {tiedNeedingDraw.length >= 2 && editable && (
+            <div className="rounded-2xl bg-loss/10 p-3 ring-1 ring-loss/30">
+              <div className="mb-1 flex items-center gap-2 text-sm font-bold text-loss"><span>🎲 Total equality</span></div>
+              <p className="mb-2 text-[11px] text-ink-400">
+                Everything is identical for <span className="font-semibold text-ink-200">{tiedNeedingDraw.map((p) => p.name).join(', ')}</span> — wins, head-to-head, and point difference. The only fair call is a random draw.
+              </p>
+              <button onClick={() => rankRandomly(tiedNeedingDraw)} disabled={!!busyKey} className="tap w-full rounded-xl bg-gradient-to-br from-brand to-brand2 py-2.5 text-xs font-bold text-white glow-brand disabled:opacity-40">{busyKey === 'draw' ? 'Drawing…' : 'Rank randomly?'}</button>
             </div>
           )}
 
@@ -244,7 +276,7 @@ export function GroupSheet({
                         />
                       ) : (
                         <ScoreRow
-                          a={a} b={b} match={m} multiSet={multiSet} pointsTo={fmt.pointsTo}
+                          a={a} b={b} match={m} multiSet={multiSet} pointsTo={fmt.pointsTo} startScore={league.startScore}
                           disabled={!editable} busy={busyKey === key}
                           onSave={(winnerId, ws, ls, sets) => saveScore(a, b, winnerId, ws, ls, sets)}
                           onClear={m && editable ? () => clearResult(a, b) : undefined}
@@ -278,6 +310,21 @@ export function GroupSheet({
           </div>
         </Modal>
       )}
+
+      {explainId && (
+        <Modal onClose={() => setExplainId(null)}>
+          <div className="px-5 py-5">
+            <div className="mb-2 flex items-center gap-2">
+              <Avatar name={standings.find((s) => s.player.id === explainId)?.player.name ?? ''} size={32} />
+              <h3 className="text-lg font-bold">{standings.find((s) => s.player.id === explainId)?.player.name}</h3>
+            </div>
+            <p className="text-sm leading-relaxed text-ink-300">{explainPlacement(explainId, standings, matches)}</p>
+          </div>
+          <div className="border-t hairline px-5 py-4">
+            <button onClick={() => setExplainId(null)} className="glass-soft tap w-full rounded-xl py-2.5 text-sm font-semibold text-ink-300">Got it</button>
+          </div>
+        </Modal>
+      )}
     </div>
   )
 }
@@ -303,8 +350,8 @@ function WLRow({ a, b, match, disabled, busy, onPick, onClear }: {
 }
 
 // ── score row: collapsed summary → expand to steppers ──
-function ScoreRow({ a, b, match, multiSet, pointsTo, disabled, busy, highlight, onSave, onClear }: {
-  a: Player; b: Player; match?: Match; multiSet: boolean; pointsTo: number; disabled?: boolean; busy?: boolean; highlight?: boolean
+function ScoreRow({ a, b, match, multiSet, pointsTo, startScore = 0, disabled, busy, highlight, onSave, onClear }: {
+  a: Player; b: Player; match?: Match; multiSet: boolean; pointsTo: number; startScore?: number; disabled?: boolean; busy?: boolean; highlight?: boolean
   onSave: (winnerId: string, winnerScore: number, loserScore: number, sets: SetScore[] | null) => void
   onClear?: () => void
 }) {
@@ -336,7 +383,7 @@ function ScoreRow({ a, b, match, multiSet, pointsTo, disabled, busy, highlight, 
   }
   return (
     <ScoreEditor
-      a={a} b={b} multiSet={multiSet} pointsTo={pointsTo} busy={!!busy}
+      a={a} b={b} multiSet={multiSet} pointsTo={pointsTo} startScore={startScore} busy={!!busy}
       initialA={aScore} initialB={bScore} initialSets={match?.sets ?? null}
       onCancel={() => setOpen(false)}
       onSave={(wid, ws, ls, sets) => { onSave(wid, ws, ls, sets); setOpen(false) }}
@@ -344,8 +391,8 @@ function ScoreRow({ a, b, match, multiSet, pointsTo, disabled, busy, highlight, 
   )
 }
 
-function ScoreEditor({ a, b, multiSet, pointsTo, busy, initialA, initialB, initialSets, onSave, onCancel }: {
-  a: Player; b: Player; multiSet: boolean; pointsTo: number; busy: boolean
+function ScoreEditor({ a, b, multiSet, pointsTo, startScore = 0, busy, initialA, initialB, initialSets, onSave, onCancel }: {
+  a: Player; b: Player; multiSet: boolean; pointsTo: number; startScore?: number; busy: boolean
   initialA: number; initialB: number; initialSets: SetScore[] | null
   onSave: (winnerId: string, winnerScore: number, loserScore: number, sets: SetScore[] | null) => void
   onCancel: () => void
@@ -356,7 +403,8 @@ function ScoreEditor({ a, b, multiSet, pointsTo, busy, initialA, initialB, initi
       const base = initialSets && initialSets.length ? initialSets : []
       return Array.from({ length: maxSets }, (_, i) => base[i] ?? { a: 0, b: 0 })
     }
-    return [{ a: initialA || pointsTo, b: initialB || 0 }]
+    // Fresh single-set match opens at the group's handicap base (spec §1); else 11:0 convenience.
+    return [{ a: initialA || (startScore || pointsTo), b: initialB || startScore }]
   })
   const setVal = (i: number, side: 'a' | 'b', v: number) =>
     setSets((s) => s.map((st, j) => (j === i ? { ...st, [side]: Math.max(0, v) } : st)))
@@ -469,9 +517,10 @@ const TIE_CHIP: Record<string, { t: string; c: string }> = {
   'mini-wins': { t: 'H2H', c: '#5aa9ff' },
   'mini-pts': { t: 'pts', c: '#f0a93b' },
   'mini-sets': { t: 'sets', c: '#f0a93b' },
-  'vs-out-pts': { t: 'vs rest', c: '#a78bff' },
-  'vs-out-sets': { t: 'vs rest', c: '#a78bff' },
+  'total-pts': { t: 'pts', c: '#f0a93b' },
+  'total-sets': { t: 'sets', c: '#f0a93b' },
   'needs-pts': { t: 'tie', c: '#fb6f7d' },
+  'draw-needed': { t: 'tie', c: '#fb6f7d' },
   draw: { t: 'draw', c: '#9aa4b2' },
 }
 export function TieChip({ reason }: { reason: TieReason }) {

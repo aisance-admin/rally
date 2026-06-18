@@ -10,52 +10,84 @@ export function maxLeaguesFor(activePlayers: number): number {
   return Math.max(1, Math.floor(activePlayers / 2))
 }
 
-export type FormationMode = 'elo' | 'random' | 'manual'
+// Seeding methods (spec §1). The "seed list" is the players in best→worst order
+// (set manually; defaults to rating). 'random' ignores the order.
+export type FormationMode = 'block' | 'snake' | 'pots' | 'random' | 'manual'
 
-/** First-season layout: split checked-in players into `numLeagues` divisions,
- *  by rating (strongest first), randomly, or manually (empty divisions to fill
- *  by hand). Admin can always edit afterwards on the draft screen. */
+const buildNames = (groups: Player[][]): DraftDivision[] =>
+  groups.map((players, i) => ({ name: LEAGUE_NAMES[i] ?? `League ${i + 1}`, color: LEAGUE_COLORS[i] ?? '#9aa4b2', players }))
+
+function splitSequential(arr: Player[], sizes: number[]): Player[][] {
+  const out: Player[][] = []
+  let idx = 0
+  for (const sz of sizes) { out.push(arr.slice(idx, idx + sz)); idx += sz }
+  return out
+}
+
+/** Deterministic seeded shuffle (so a draw is stable per `seed` and testable). */
+function seededShuffle<T>(arr: T[], seed: number): T[] {
+  const a = [...arr]
+  let s = (seed >>> 0) || 1
+  const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296 }
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]] }
+  return a
+}
+
+/** Snake / serpentine: deal the seed list across the groups, forward then backward
+ *  each pass. 16 seeds / 4 groups → G1[1,8,9,16], G2[2,7,10,15], G3[3,6,11,14], G4[4,5,12,13]. */
+export function snakeAssign(seed: Player[], sizes: number[]): Player[][] {
+  const groups: Player[][] = sizes.map(() => [])
+  const G = groups.length
+  let idx = 0, pass = 0
+  while (idx < seed.length) {
+    const seq = pass % 2 === 0 ? [...Array(G).keys()] : [...Array(G).keys()].reverse()
+    let placed = false
+    for (const g of seq) {
+      if (idx >= seed.length) break
+      if (groups[g].length < sizes[g]) { groups[g].push(seed[idx++]); placed = true }
+    }
+    if (!placed) break
+    pass++
+  }
+  return groups
+}
+
+/** Seeded pots (World-Cup): split the seed list into pots of one-per-group, then
+ *  draw each pot randomly so every group gets one player from each pot. */
+export function potsAssign(seed: Player[], sizes: number[], seedNum: number): Player[][] {
+  const G = sizes.length
+  const groups: Player[][] = sizes.map(() => [])
+  const pots: Player[][] = []
+  for (let i = 0; i < seed.length; i += G) pots.push(seed.slice(i, i + G))
+  pots.forEach((pot, pi) => {
+    const shuffled = seededShuffle(pot, (seedNum + 1) * 7919 + pi)
+    const avail = groups.map((_, g) => g).filter((g) => groups[g].length < sizes[g])
+    shuffled.forEach((p, j) => groups[avail[j % avail.length]].push(p))
+  })
+  return groups
+}
+
+/** First-season / qualifier layout from a seed list (best→worst). Methods: block
+ *  (top-down), snake, pots, random (ignores order), manual (empty groups to fill). */
 export function buildInitialDivisions(
-  players: Player[],
+  seed: Player[],
   numLeagues: number,
   mode: FormationMode,
+  opts: { reseed?: number } = {},
 ): DraftDivision[] {
-  // Manual: hand the admin empty divisions; everyone starts on the bench.
-  if (mode === 'manual') {
-    return Array.from({ length: Math.max(1, numLeagues) }, (_, i) => ({
-      name: LEAGUE_NAMES[i] ?? `League ${i + 1}`,
-      color: LEAGUE_COLORS[i] ?? '#9aa4b2',
-      players: [] as Player[],
-    }))
-  }
-  let ordered: Player[]
-  if (mode === 'elo') {
-    ordered = [...players].sort((a, b) => b.elo - a.elo)
-  } else {
-    ordered = [...players]
-    for (let i = ordered.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1))
-      ;[ordered[i], ordered[j]] = [ordered[j], ordered[i]]
-    }
-  }
-  const sizes = manualSizes(ordered.length, numLeagues)
-  const divs: DraftDivision[] = []
-  let idx = 0
-  sizes.forEach((sz, i) => {
-    divs.push({
-      name: LEAGUE_NAMES[i] ?? `League ${i + 1}`,
-      color: LEAGUE_COLORS[i] ?? '#9aa4b2',
-      players: ordered.slice(idx, idx + sz),
-    })
-    idx += sz
-  })
-  return divs
+  if (mode === 'manual') return buildNames(Array.from({ length: Math.max(1, numLeagues) }, () => [] as Player[]))
+  const sizes = manualSizes(seed.length, numLeagues)
+  if (mode === 'snake') return buildNames(snakeAssign(seed, sizes))
+  if (mode === 'pots') return buildNames(potsAssign(seed, sizes, opts.reseed ?? 1))
+  if (mode === 'random') return buildNames(splitSequential(seededShuffle(seed, opts.reseed ?? 1), sizes))
+  return buildNames(splitSequential(seed, sizes)) // 'block' — top-down
 }
 
 export interface DraftDivision {
   name: string
   color: string
   players: Player[]
+  startScore?: number // per-group handicap: matches start from this score (spec §1)
 }
 
 export interface Series {
@@ -150,11 +182,12 @@ export type TieReason =
   | 'H2H' // head-to-head decided it
   | 'mini-wins' // wins within the tied group
   | 'mini-sets' // set diff within the tied group (best-of-N)
-  | 'mini-pts' // point balance within the tied group → "pts (H2H)"
-  | 'vs-out-sets' // set diff vs players outside the tie
-  | 'vs-out-pts' // point balance vs players outside the tie → "vs #N"
+  | 'mini-pts' // point balance within the tied group (spec step 3a) → "pts (H2H)"
+  | 'total-sets' // total set diff across all group matches (best-of-N)
+  | 'total-pts' // total point diff across all group matches (spec step 3b)
   | 'needs-pts' // tied; can't resolve without real scores (win/loss entry) → prompt for points
-  | 'draw' // random draw — total equality
+  | 'draw-needed' // total equality, not yet resolved — organizer must confirm a random draw (spec step 4)
+  | 'draw' // placement was decided by a confirmed random draw
 
 export interface RankOpts {
   multiSet?: boolean
@@ -202,7 +235,8 @@ function setDiffOf(m: Match): number {
  */
 export function rankDivision(players: Player[], matches: Match[], opts: RankOpts = {}): RankedPlayer[] {
   const ids = new Set(players.map((p) => p.id))
-  const lm = matches.filter((m) => m.winnerId && ids.has(m.playerAId) && ids.has(m.playerBId))
+  // 'pending' = submitted but not yet organizer-validated → never affects live standings (§9).
+  const lm = matches.filter((m) => m.winnerId && m.status !== 'pending' && ids.has(m.playerAId) && ids.has(m.playerBId))
 
   const stat = new Map<string, { played: number; wins: number; pts: number; sets: number }>()
   for (const p of players) stat.set(p.id, { played: 0, wins: 0, pts: 0, sets: 0 })
@@ -267,16 +301,18 @@ export function rankDivision(players: Player[], matches: Match[], opts: RankOpts
       return out
     }
 
+    // Step 2 — head-to-head wins among the tied players.
     let r = trySplit((p) => winsAmong(p.id, group), group.length === 2 ? 'H2H' : 'mini-wins')
     if (r) return r
+    // Step 3a — within the tied players (sets before points for best-of-N).
     if (opts.multiSet) { r = trySplit((p) => setsVs(p.id, group), 'mini-sets'); if (r) return r }
     if (!allFinalAmong(group)) return [...group].sort((a, b) => b.elo - a.elo).map((p) => ({ player: p, reason: 'needs-pts' as TieReason }))
     r = trySplit((p) => ptsVs(p.id, group), 'mini-pts'); if (r) return r
-    if (opts.multiSet) { r = trySplit((p) => setsVs(p.id, outside), 'vs-out-sets'); if (r) return r }
-    r = trySplit((p) => ptsVs(p.id, outside), 'vs-out-pts'); if (r) return r
-    return [...group]
-      .sort((a, b) => hash(`${opts.seed ?? 0}:${a.id}`) - hash(`${opts.seed ?? 0}:${b.id}`))
-      .map((p) => ({ player: p, reason: 'draw' as TieReason }))
+    // Step 3b — total across ALL of the player's group matches (incl. vs non-tied).
+    if (opts.multiSet) { r = trySplit((p) => stat.get(p.id)!.sets, 'total-sets'); if (r) return r }
+    r = trySplit((p) => stat.get(p.id)!.pts, 'total-pts'); if (r) return r
+    // Step 4 — total equality: do NOT auto-resolve; flag for an explicit organizer-confirmed draw.
+    return [...group].sort((a, b) => b.elo - a.elo).map((p) => ({ player: p, reason: 'draw-needed' as TieReason }))
   }
 
   const ordered: { player: Player; reason: TieReason }[] = []
@@ -284,15 +320,65 @@ export function rankDivision(players: Player[], matches: Match[], opts: RankOpts
     if (bucket.length === 1) ordered.push({ player: bucket[0], reason: null })
     else ordered.push(...breakTie(bucket))
   }
+  // Players placed by a confirmed random draw (synthesized rank rows flagged round=1).
+  const drawnIds = new Set<string>()
+  for (const m of lm) if (m.status === 'rank' && m.round === 1) { drawnIds.add(m.playerAId); drawnIds.add(m.playerBId) }
   return ordered.map((o) => {
     const s = stat.get(o.player.id)!
-    return { player: o.player, played: s.played, wins: s.wins, pointDiff: s.pts, setDiff: s.sets, reason: o.reason }
+    return { player: o.player, played: s.played, wins: s.wins, pointDiff: s.pts, setDiff: s.sets, reason: drawnIds.has(o.player.id) ? 'draw' : o.reason }
   })
 }
 
 /** Final standings order (best first) within a league via the tie-break engine. */
 export function standingsOrder(league: LeagueWithPlayers, matches: Match[]): Player[] {
   return rankDivision(league.players, matches, { multiSet: parseFormat(league.format).sets > 1, seed: hash(league.id) }).map((r) => r.player)
+}
+
+function ord(n: number): string {
+  const s = ['th', 'st', 'nd', 'rd'], v = n % 100
+  return n + (s[(v - 20) % 10] ?? s[v] ?? s[0])
+}
+
+/** Plain-language explanation of WHY a player sits where they do (spec §2, transparency
+ *  principle). Driven by the tie-break `reason` + the equal-wins neighbours. */
+export function explainPlacement(playerId: string, ranked: RankedPlayer[], _matches: Match[]): string {
+  const idx = ranked.findIndex((r) => r.player.id === playerId)
+  if (idx < 0) return ''
+  const me = ranked[idx]
+  const place = ord(idx + 1)
+  const wl = `${me.wins}W–${me.played - me.wins}L`
+  // who else finished on the same number of wins
+  const sameWins = ranked.filter((r) => r.player.id !== playerId && r.wins === me.wins).map((r) => r.player.name)
+  const others =
+    sameWins.length === 0 ? '' : sameWins.length === 1 ? sameWins[0] : `${sameWins.slice(0, -1).join(', ')} and ${sameWins.slice(-1)}`
+  const above = idx > 0 ? ranked[idx - 1].player.name : null
+
+  switch (me.reason) {
+    case null:
+      return `${place} on wins (${wl}) — clear, no tie-break needed.`
+    case 'H2H':
+      return above && sameWins.length
+        ? `${place} — tied on wins (${wl}) with ${others}, but ${above} won the head-to-head match against you.`
+        : `${place} — won the head-to-head against ${others} after tying on wins (${wl}).`
+    case 'mini-wins':
+      return `${place} — tied on wins (${wl}) with ${others}; ranked by wins in the matches among the tied players.`
+    case 'mini-pts':
+      return `${place} — tied on wins (${wl}) and head-to-head with ${others}; separated by point difference in the matches among them.`
+    case 'mini-sets':
+      return `${place} — tied on wins (${wl}) with ${others}; separated by set difference in the matches among them.`
+    case 'total-pts':
+      return `${place} — still level with ${others} among themselves; separated by total point difference across all group matches.`
+    case 'total-sets':
+      return `${place} — still level with ${others} among themselves; separated by total set difference across all group matches.`
+    case 'needs-pts':
+      return `${place} — level on wins and head-to-head with ${others}. Enter the scores of their matches to rank them.`
+    case 'draw-needed':
+      return `Total equality with ${others} — everything is identical. Confirm a random draw to set the order.`
+    case 'draw':
+      return `${place} — placed by a random draw after total equality${others ? ` with ${others}` : ''}.`
+    default:
+      return `${place} on wins (${wl}).`
+  }
 }
 
 export interface PromotionConfig {
@@ -408,6 +494,7 @@ export async function createSeasonFromDivisions(
     tier: i + 1,
     color: d.color,
     format,
+    start_score: d.startScore ?? 0,
   }))
   const { data: leagueRows, error: lErr } = await supabase
     .from('rally_leagues')
@@ -434,7 +521,7 @@ export async function createSeasonFromDivisions(
 // ───────────────────────── qualifier → divisions (spec §6) ─────────────────────────
 
 /** How to split players of one finishing position when it feeds several divisions. */
-export type QualSplit = 'random' | 'points' | 'rating'
+export type QualSplit = 'random' | 'points' | 'seed'
 /** A finishing position maps to `span` divisions starting at `div` (span 1 = one division). */
 export interface PositionRule { div: number; span: number }
 
@@ -476,7 +563,7 @@ export function buildDivisionsFromQualifier(
     const startDiv = Math.max(1, rule.div)
     const span = Math.max(1, rule.span)
     let players = byPos.get(pos)!.slice()
-    if (split === 'rating') players.sort((a, b) => b.player.elo - a.player.elo)
+    if (split === 'seed') players.sort((a, b) => b.player.elo - a.player.elo) // seed basis = rating (default seed list)
     else if (split === 'points') players.sort((a, b) => b.pts - a.pts || b.wins - a.wins)
     else players = players.map((p) => ({ p, k: hash(`${seed}:${pos}:${p.player.id}`) })).sort((a, b) => a.k - b.k).map((x) => x.p)
     const n = players.length

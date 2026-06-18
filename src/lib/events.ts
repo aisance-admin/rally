@@ -34,6 +34,7 @@ const toMatch = (r: Record<string, any>): Match => ({
   divisionId: r.division_id,
   format: r.format,
   status: (r.status ?? 'final') as Match['status'],
+  round: r.round ?? null,
   playedAt: r.played_at,
 })
 
@@ -76,7 +77,7 @@ async function buildTieredLeagues(eventId: string, ranked: Player[], numLeagues:
   const leaguePayload = sizes.map((size, i) => {
     const preset = DIV_PRESET[i] ?? { name: `League ${i + 1}`, color: '#9aa4b2' }
     const format = size === 5 ? 'pools→playoff' : i === 0 ? 'Best of 3 to 11' : '1 set to 11'
-    return { event_id: eventId, name: preset.name, tier: i + 1, color: preset.color, format }
+    return { event_id: eventId, name: preset.name, tier: i + 1, color: preset.color, format, start_score: 0 }
   })
   const { data: leagueRows, error: lErr } = await supabase
     .from('rally_leagues')
@@ -179,6 +180,7 @@ export async function fetchEventDetail(eventId: string): Promise<EventDetail> {
     color: l.color,
     format: l.format,
     validatedAt: l.validated_at ?? null,
+    startScore: l.start_score ?? 0,
     players: parts
       .filter((pp) => pp.league_id === l.id)
       .map((pp) => playersById[pp.player_id])

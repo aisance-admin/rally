@@ -9,7 +9,7 @@ import {
   LEAGUE_NAMES,
   type WL,
 } from '../lib/seasons'
-import { Avatar } from './bits'
+import { Avatar, nameMatches, SearchInput } from './bits'
 import { SkillBadge } from './SkillBadge'
 
 const clone = (divs: DraftDivision[]) => divs.map((d) => ({ ...d, players: [...d.players] }))
@@ -48,6 +48,7 @@ export function DivisionDraft({
   const [divisions, setDivisions] = useState<DraftDivision[]>(() => clone(initialDivisions))
   const [busy, setBusy] = useState(false)
   const [replacing, setReplacing] = useState<{ div: number; id: string } | null>(null)
+  const [benchQ, setBenchQ] = useState('')
   const showRecord = !!prevRecords
 
   // Re-seed when the parent recomputes the layout (reshuffle / promote count).
@@ -112,6 +113,10 @@ export function DivisionDraft({
     ])
   const removeDivision = (i: number) =>
     setDivisions((divs) => (divs[i].players.length > 0 || divs.length <= 1 ? divs : divs.filter((_, j) => j !== i)))
+  const setStart = (i: number, v: number) =>
+    setDivisions((divs) => divs.map((d, j) => (j === i ? { ...d, startScore: Math.max(0, v) } : d)))
+  const anyHandicap = divisions.some((d) => (d.startScore ?? 0) > 0)
+  const clearHandicaps = () => setDivisions((divs) => divs.map((d) => ({ ...d, startScore: 0 })))
 
   async function start() {
     if (!valid) return
@@ -145,6 +150,12 @@ export function DivisionDraft({
       </div>
 
       {note && <div className="glass-soft rounded-2xl px-4 py-2.5 text-xs text-ink-400">{note}</div>}
+      {anyHandicap && (
+        <div className="flex items-center justify-between gap-2 rounded-2xl bg-brand/10 px-4 py-2 text-xs text-brand-400 ring-1 ring-brand/20">
+          <span>⚖️ Larger groups start ahead (e.g. 2–2) so every division finishes around the same time. Adjust per group above.</span>
+          <button onClick={clearHandicaps} className="tap shrink-0 rounded-lg bg-white/8 px-2 py-1 font-semibold text-ink-300 hover:text-white">Turn off</button>
+        </div>
+      )}
       {tooSmall.length > 0 && (
         <div className="rounded-2xl bg-loss/10 px-4 py-2.5 text-xs font-medium text-loss ring-1 ring-loss/25">
           A division needs at least 2 players — {tooSmall.map((d) => d.name).join(', ')} {tooSmall.length === 1 ? 'has' : 'have'} just one. Move someone in or remove the division.
@@ -160,9 +171,19 @@ export function DivisionDraft({
                 <span className="font-bold">{d.name}</span>
                 <span className="rounded-md bg-white/8 px-1.5 text-xs font-semibold text-ink-400">{d.players.length}</span>
               </div>
-              {d.players.length === 0 && divisions.length > 1 && (
-                <button onClick={() => removeDivision(i)} className="text-[11px] font-semibold text-ink-500 hover:text-loss">remove</button>
-              )}
+              <div className="flex items-center gap-2">
+                {d.players.length >= 2 && (
+                  <div className="flex items-center gap-1" title="Handicap — this group's matches start from this score so a bigger group finishes on time">
+                    <span className="text-[10px] uppercase tracking-wide text-ink-500">start</span>
+                    <button onClick={() => setStart(i, (d.startScore ?? 0) - 1)} className="tap grid h-5 w-5 place-items-center rounded bg-white/8 text-xs font-bold text-ink-400 hover:text-white">−</button>
+                    <span className="w-3 text-center font-mono text-xs font-bold tabular-nums" style={{ color: (d.startScore ?? 0) > 0 ? '#ff8a5e' : undefined }}>{d.startScore ?? 0}</span>
+                    <button onClick={() => setStart(i, (d.startScore ?? 0) + 1)} className="tap grid h-5 w-5 place-items-center rounded bg-white/8 text-xs font-bold text-ink-400 hover:text-white">+</button>
+                  </div>
+                )}
+                {d.players.length === 0 && divisions.length > 1 && (
+                  <button onClick={() => removeDivision(i)} className="text-[11px] font-semibold text-ink-500 hover:text-loss">remove</button>
+                )}
+              </div>
             </div>
             <div className="divide-hair">
               {d.players.map((raw, pos) => {
@@ -201,11 +222,12 @@ export function DivisionDraft({
           </span>
           {replacing && <button onClick={() => setReplacing(null)} className="rounded-lg bg-white/8 px-2 py-1 text-[11px] font-semibold text-ink-300 tap">Cancel replace</button>}
         </div>
+        {bench.length > 5 && <div className="px-3 pb-2"><SearchInput value={benchQ} onChange={setBenchQ} placeholder="Find a player…" /></div>}
         {bench.length === 0 ? (
           <div className="px-4 py-5 text-center text-xs text-ink-500">Everyone's placed.{replacing && ' Add a player to the roster first to swap them in.'}</div>
         ) : (
           <div className="divide-hair">
-            {bench.map((p) => (
+            {bench.filter((p) => nameMatches(p, benchQ)).map((p) => (
               <div key={p.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
                 <SkillBadge elo={p.elo} size="sm" />
                 <Avatar name={p.name} size={26} />

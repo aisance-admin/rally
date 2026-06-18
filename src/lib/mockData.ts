@@ -130,6 +130,7 @@ export function buildMockData(): AppData {
         divisionId: div.id,
         format: formats[Math.floor(rng() * formats.length)],
         status: 'final',
+        round: null,
         playedAt: isoDaysAgo(round, Math.floor(rng() * 6)),
       })
     }

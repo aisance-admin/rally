@@ -43,6 +43,7 @@ const toMatch = (r: Row): Match => ({
   divisionId: r.division_id,
   format: r.format,
   status: (r.status ?? 'final') as Match['status'],
+  round: r.round ?? null,
   playedAt: r.played_at,
 })
 
@@ -167,6 +168,7 @@ export interface RecordMatchInput {
   sets?: SetScore[] | null
   format: string
   status?: MatchStatus // default 'final'; 'wl' = win/loss only; 'rank' = synthesized, no ELO
+  round?: number | null // 1 = synthesized rank row from a confirmed random draw
   eventId?: string | null
   leagueId?: string | null
 }
@@ -251,6 +253,7 @@ export async function recordMatch(input: RecordMatchInput, players: Player[], al
     format: input.format,
     division_id: winner.divisionId,
     status,
+    round: input.round ?? null,
   }
 
   const q = existing

@@ -26,8 +26,9 @@ export interface Division {
 }
 
 export type SetScore = { a: number; b: number }
-/** 'final' = real points entered · 'wl' = win/loss only (1–0) · 'rank' = synthesized from a direct ranking */
-export type MatchStatus = 'final' | 'wl' | 'rank'
+/** 'final' = real points entered · 'wl' = win/loss only (1–0) · 'rank' = synthesized from a
+ *  direct ranking · 'pending' = submitted (e.g. by a scorekeeper) but not yet organizer-validated */
+export type MatchStatus = 'final' | 'wl' | 'rank' | 'pending'
 
 export interface Match {
   id: ID
@@ -42,6 +43,7 @@ export interface Match {
   divisionId: ID
   format: string // e.g. "1 set to 11"
   status: MatchStatus
+  round: number | null // repurposed: 1 = placement decided by a confirmed random draw
   playedAt: string // ISO
 }
 
@@ -75,6 +77,7 @@ export interface League {
   color: string
   format: string
   validatedAt: string | null // when the group was validated/locked; null = open
+  startScore: number // per-group handicap: matches begin from this score (spec §1); 0 = none
 }
 
 export interface LeagueWithPlayers extends League {

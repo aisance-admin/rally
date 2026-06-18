@@ -93,3 +93,20 @@ export function Badge({
     </span>
   )
 }
+
+/** Does a player match a free-text query (name or handle)? Empty query matches all. */
+export const nameMatches = (p: { name: string; handle: string }, q: string) => {
+  const s = q.trim().toLowerCase()
+  return !s || `${p.name} ${p.handle}`.toLowerCase().includes(s)
+}
+
+/** Reusable search/filter box for player lists (spec §1, large rosters). */
+export function SearchInput({ value, onChange, placeholder = 'Search…' }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return (
+    <div className="glass-soft flex items-center gap-2 rounded-xl px-3 py-2">
+      <span className="text-ink-500">🔎</span>
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="w-full bg-transparent text-sm outline-none placeholder:text-ink-500" />
+      {value && <button onClick={() => onChange('')} className="text-ink-500 hover:text-white" aria-label="Clear search">✕</button>}
+    </div>
+  )
+}
