@@ -5,13 +5,20 @@ export default {
     extend: {
       colors: {
         ink: {
+          // Dark SURFACE shades (bg-/border-/ring-/divide-ink-700..900) — keep dark.
           900: '#06080f',
           850: '#0b0e17',
           800: '#121624',
           750: '#171c2c',
           700: '#202637',
-          600: '#2c3346',
-          500: '#3a4357',
+          // Light TEXT ramp (text-ink-*) — readable on the dark glass at WCAG AA.
+          // 600 = faintest hint · 500 = muted (workhorse) · 400/300/200 = brighter.
+          600: '#868fa3',
+          500: '#939cb0',
+          400: '#abb4c6',
+          300: '#ccd4e1',
+          200: '#e7eaf1',
+          100: '#f3f5fa',
         },
         brand: {
           DEFAULT: '#ff6a3d',
